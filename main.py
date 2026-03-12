@@ -7,9 +7,13 @@
     # 翻译最新 N 个 episode
     python main.py --feed <rss_url> --episodes 3
     python main.py --feed <https://feeds.npr.org/510289/podcast.xml> --episodes 1
-    
+
     # 使用 config.yaml 中配置的所有 feed
     python main.py --all
+
+    # 使用本地 MP3 文件测试完整工作流
+    python main.py test --file /path/to/audio.mp3
+    python main.py test --file /path/to/audio.mp3 --name "播客名" --title "节目标题"
 
     # 查看处理进度
     python main.py --status
@@ -77,6 +81,19 @@ def cmd_all(args):
             logger.error(f"Feed 处理失败: {feed_url} - {e}")
 
 
+def cmd_test(args):
+    """使用本地 MP3 文件测试完整工作流。"""
+    settings = setup()
+    from pipeline.orchestrator import PodcastPipeline
+
+    pipeline = PodcastPipeline(settings)
+    pipeline.process_local_file(
+        audio_path=args.file,
+        podcast_name=args.name,
+        episode_title=args.title,
+    )
+
+
 def cmd_status(args):
     """查看处理进度。"""
     from pipeline.progress_tracker import ProgressTracker
@@ -124,6 +141,12 @@ def main():
     # all 命令
     subparsers.add_parser("all", help="翻译 config.yaml 中所有 feed")
 
+    # test 命令
+    test_parser = subparsers.add_parser("test", help="使用本地 MP3 文件测试完整工作流")
+    test_parser.add_argument("--file", required=True, help="本地 MP3 文件路径")
+    test_parser.add_argument("--name", default="本地测试", help="播客名称（默认: 本地测试）")
+    test_parser.add_argument("--title", default="本地音频测试", help="节目标题（默认: 本地音频测试）")
+
     # status 命令
     subparsers.add_parser("status", help="查看处理进度")
 
@@ -138,6 +161,7 @@ def main():
         "list": cmd_list,
         "translate": cmd_translate,
         "all": cmd_all,
+        "test": cmd_test,
         "status": cmd_status,
     }
     commands[args.command](args)

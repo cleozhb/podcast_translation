@@ -121,3 +121,71 @@ class PodcastPipeline:
         )
 
         logger.info(f"处理完成: {episode.title} → {output_path}")
+
+    def process_local_file(
+        self,
+        audio_path: str | Path,
+        podcast_name: str = "本地测试",
+        episode_title: str = "本地音频测试",
+    ):
+        """
+        使用本地已下载的 MP3 文件跑完整工作流（ASR → 翻译 → TTS）。
+
+        跳过 RSS 解析和音频下载步骤，直接从本地文件开始。
+
+        Args:
+            audio_path: 本地 MP3 文件路径
+            podcast_name: 播客名称（用于翻译上下文和声纹缓存）
+            episode_title: 节目标题（用于翻译上下文）
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"音频文件不存在: {audio_path}")
+
+        guid = f"local_{audio_path.stem}"
+        logger.info(f"开始本地文件测试: {audio_path.name}")
+
+        # Step 1: ASR 转录（使用本地文件路径，需要 file:// 协议）
+        self.tracker.update_status(
+            guid, "transcribing",
+            podcast_name=podcast_name,
+            title=episode_title,
+            audio_path=audio_path,
+        )
+        file_url = f"file://{audio_path.resolve()}"
+        transcript = self.asr.transcribe(file_url)
+
+        # 保存英文转录
+        transcript_dir = self.data_dir / "transcripts"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = transcript_dir / f"{audio_path.stem}.txt"
+        transcript_path.write_text(transcript.full_text, encoding="utf-8")
+        self.tracker.update_status(guid, "translating", transcript_path=transcript_path)
+        logger.info(f"ASR 转录完成: {len(transcript.segments)} 个句子")
+
+        # Step 2: LLM 翻译
+        translation = self.translator.translate(
+            transcript.full_text,
+            podcast_name=podcast_name,
+            episode_title=episode_title,
+        )
+
+        # 保存中文翻译
+        translation_dir = self.data_dir / "translations"
+        translation_dir.mkdir(parents=True, exist_ok=True)
+        translation_path = translation_dir / f"{audio_path.stem}.txt"
+        translation_path.write_text(translation, encoding="utf-8")
+        self.tracker.update_status(guid, "synthesizing", translation_path=translation_path)
+        logger.info("LLM 翻译完成")
+
+        # Step 3: 提取声纹 + TTS 合成
+        voice_sample = extract_voice_sample(audio_path, transcript, podcast_name)
+
+        output_dir = self.data_dir / "audio_output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{audio_path.stem}_zh.mp3"
+
+        self.tts.synthesize(translation, output_path, voice_sample_path=voice_sample)
+        self.tracker.update_status(guid, "completed", output_audio_path=output_path)
+
+        logger.info(f"本地文件测试完成: {audio_path.name} → {output_path}")
