@@ -4,7 +4,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from asr.aliyun_asr import AliyunASR
+from asr.aliyun_asr import DashScopeASR
 from asr.base import TranscriptResult
 from config import Settings
 from pipeline.progress_tracker import ProgressTracker
@@ -23,11 +23,10 @@ class PodcastPipeline:
         self.data_dir = Path(settings.data_dir)
         self.tracker = ProgressTracker(str(self.data_dir / "progress.db"))
 
-        # 初始化各模块
-        self.asr = AliyunASR(
-            appkey=settings.aliyun_asr_appkey,
-            ak_id=settings.aliyun_access_key_id,
-            ak_secret=settings.aliyun_access_key_secret,
+        # 初始化各模块 - 全部使用 DashScope API Key
+        self.asr = DashScopeASR(
+            api_key=settings.dashscope_api_key,
+            model=settings.dashscope_asr_model,
         )
         self.translator = QwenTranslator(
             api_key=settings.dashscope_api_key,
@@ -35,6 +34,7 @@ class PodcastPipeline:
         )
         self.tts = AliyunCosyVoiceTTS(
             api_key=settings.dashscope_api_key,
+            model=settings.dashscope_tts_model,
         )
 
     def process_feed(self, feed_url: str, max_episodes: int | None = None):

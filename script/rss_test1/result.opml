@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+<head><title>Validated Podcast Feeds</title></head>
+<body>
+  <outline text="Lex Fridman Podcast" title="Lex Fridman Podcast" type="rss" xmlUrl="https://lexfridman.com/feed/podcast/" />
+  <outline text="a16z Podcast" title="a16z Podcast" type="rss" xmlUrl="https://feeds.simplecast.com/JGE3yC0V" />
+  <outline text="The Vergecast" title="The Vergecast" type="rss" xmlUrl="https://feeds.megaphone.fm/vergecast" />
+  <outline text="Hard Fork (NYT)" title="Hard Fork (NYT)" type="rss" xmlUrl="https://feeds.simplecast.com/l2i9YnTd" />
+  <outline text="The Changelog" title="The Changelog" type="rss" xmlUrl="https://changelog.com/podcast/feed" />
+  <outline text="Darknet Diaries" title="Darknet Diaries" type="rss" xmlUrl="https://feeds.megaphone.fm/darknetdiaries" />
+  <outline text="Practical AI" title="Practical AI" type="rss" xmlUrl="https://changelog.com/practicalai/feed" />
+  <outline text="Exponent" title="Exponent" type="rss" xmlUrl="https://exponent.fm/feed/" />
+  <outline text="How I Built This (NPR)" title="How I Built This (NPR)" type="rss" xmlUrl="https://feeds.npr.org/510313/podcast.xml" />
+  <outline text="Planet Money (NPR)" title="Planet Money (NPR)" type="rss" xmlUrl="https://feeds.npr.org/510289/podcast.xml" />
+  <outline text="Freakonomics Radio" title="Freakonomics Radio" type="rss" xmlUrl="https://feeds.simplecast.com/Y8lFbOT4" />
+  <outline text="The Indicator (NPR)" title="The Indicator (NPR)" type="rss" xmlUrl="https://feeds.npr.org/510325/podcast.xml" />
+  <outline text="Invest Like the Best" title="Invest Like the Best" type="rss" xmlUrl="https://feeds.megaphone.fm/investlikethebest" />
+  <outline text="The Knowledge Project" title="The Knowledge Project" type="rss" xmlUrl="https://theknowledgeproject.libsyn.com/rss" />
+  <outline text="Huberman Lab" title="Huberman Lab" type="rss" xmlUrl="https://feeds.megaphone.fm/hubermanlab" />
+  <outline text="Science Magazine Podcast" title="Science Magazine Podcast" type="rss" xmlUrl="https://www.science.org/rss/podcast.xml" />
+  <outline text="Radiolab" title="Radiolab" type="rss" xmlUrl="https://feeds.simplecast.com/EmVW7VGp" />
+  <outline text="The Peter Attia Drive" title="The Peter Attia Drive" type="rss" xmlUrl="https://peterattiadrive.libsyn.com/rss" />
+  <outline text="The Naked Scientists" title="The Naked Scientists" type="rss" xmlUrl="https://www.thenakedscientists.com/naked_scientists_podcast.xml" />
+</body>
+</opml>

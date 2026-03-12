@@ -6,7 +6,8 @@
 
     # 翻译最新 N 个 episode
     python main.py --feed <rss_url> --episodes 3
-
+    python main.py --feed <https://feeds.npr.org/510289/podcast.xml> --episodes 1
+    
     # 使用 config.yaml 中配置的所有 feed
     python main.py --all
 
