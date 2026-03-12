@@ -1,6 +1,7 @@
 """DashScope 语音识别（长音频异步模式）。"""
 
 import dashscope
+import requests
 from loguru import logger
 
 from asr.base import BaseASR, TranscriptResult, TranscriptSegment
@@ -85,23 +86,37 @@ class DashScopeASR(BaseASR):
         texts = []
 
         # 从响应中提取句子级别的转录结果
+        # DashScope 异步 Transcription API 返回的 results 中每个元素包含 transcription_url，
+        # 需要通过 HTTP 请求获取实际的转录 JSON
         results = response.output.results
-        
+
         for result in results:
-            # 每个 result 对应一个音频文件的识别结果
-            sentences = result.get('sentences', [])
-            
-            for sent in sentences:
-                text = sent.get('text', '')
-                if text.strip():
-                    texts.append(text)
-                    segments.append(
-                        TranscriptSegment(
-                            text=text,
-                            start_ms=sent.get('begin_time', 0),
-                            end_ms=sent.get('end_time', 0),
+            transcription_url = result.get('transcription_url')
+            if not transcription_url:
+                logger.warning(f"ASR result 中未找到 transcription_url，跳过: {result}")
+                continue
+
+            # 获取转录结果 JSON
+            logger.debug(f"获取转录结果: {transcription_url}")
+            resp = requests.get(transcription_url, timeout=30)
+            resp.raise_for_status()
+            transcription_data = resp.json()
+
+            # 从转录 JSON 中提取 sentences
+            # 结构: {"transcripts": [{"sentences": [...], "text": "..."}]}
+            for transcript in transcription_data.get('transcripts', []):
+                sentences = transcript.get('sentences', [])
+                for sent in sentences:
+                    text = sent.get('text', '')
+                    if text.strip():
+                        texts.append(text)
+                        segments.append(
+                            TranscriptSegment(
+                                text=text,
+                                start_ms=sent.get('begin_time', 0),
+                                end_ms=sent.get('end_time', 0),
+                            )
                         )
-                    )
 
         full_text = " ".join(texts)
         logger.info(f"DashScope ASR 结果：{len(segments)} 个句子，{len(full_text)} 字符")
