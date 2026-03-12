@@ -1,0 +1,24 @@
+# RSS 解析
+feedparser>=6.0.10
+
+# 音频处理（需系统安装 ffmpeg）
+pydub>=0.25.1
+
+# HTTP 请求
+requests>=2.31.0
+
+# 阿里云 SDK
+dashscope>=1.14.0
+aliyun-nls>=0.0.1
+oss2>=2.18.0
+
+# 配置管理
+pydantic-settings>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# 进度条
+tqdm>=4.66.0
+
+# 日志
+loguru>=0.7.0

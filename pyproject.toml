@@ -1,0 +1,19 @@
+[project]
+name = "podcast-translation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.10",
+    "pydub>=0.25.1",
+    "requests>=2.31.0",
+    "dashscope>=1.14.0",
+    "aliyun-nls>=0.0.1",
+    "oss2>=2.18.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.66.0",
+    "loguru>=0.7.0",
+]

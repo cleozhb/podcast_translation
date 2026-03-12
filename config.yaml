@@ -1,0 +1,7 @@
+# 播客翻译工具 - 默认 RSS 源列表
+rss_feeds:
+  - https://lexfridman.com/feed/podcast/          # Lex Fridman Podcast
+  - https://www.lennysnewsletter.com/feed          # Lenny's Podcast
+
+# 每个 feed 最多处理的 episode 数量
+max_episodes_per_feed: 3
