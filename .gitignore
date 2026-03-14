@@ -1,19 +1,47 @@
-# Python-generated files
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Output directory
+output/
+
+# Python cache
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 wheels/
-*.egg-info
+*.egg-info/
+.installed.cfg
+*.egg
+.DS_Store
 
-# Virtual environments
-.venv
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# 运行时数据
-data/
-
-# 敏感配置
+# Environment variables
 .env
+config.yaml
 
-# 日志
+
+# logs
 *.log
