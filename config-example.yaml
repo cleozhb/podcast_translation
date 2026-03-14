@@ -1,0 +1,81 @@
+# ============================================================
+# 播客翻译工作流配置
+# ============================================================
+
+# 当前使用的 Provider（切换只需改这里）
+active_providers:
+  stt: dashscope        # dashscope | baidu
+  llm: dashscope        # dashscope | baidu
+  tts: cosyvoice        # cosyvoice（后续可扩展 baidu_tts 等）
+
+# ---- 阿里云 DashScope ----
+dashscope:
+  api_key: "sk-"
+  stt_model: "fun-asr"              
+  llm_model: "qwen-plus"
+
+# ---- 百度千帆 ----
+baidu:
+  api_key: "your-baidu-api-key"
+  secret_key: "your-baidu-secret-key"
+  stt_app_id: "your-baidu-app-id"
+  llm_model: "ernie-4.0-8k"
+
+# ---- 阿里云 CosyVoice TTS ----
+cosyvoice:
+  api_key: "sk-"      # 同 DashScope API Key
+  model: "cosyvoice-v3.5-flash"
+  # 声纹音频要求：10-30秒，单人说话，无背景音乐
+  voiceprint_duration: 20                  # 提取声纹片段的目标时长（秒）
+
+# ---- 阿里云 OSS（TTS 声音克隆需要公网 URL）----
+oss:
+  access_key_id: "LTAIxxx"
+  access_key_secret: "XV6xxx"
+  endpoint: "https://oss-cn-xxx.aliyuncs.com"
+  bucket_name: "bucket-name"
+  # 上传到 OSS 的路径前缀
+  prefix: "podcast-voiceprints/"
+
+# ---- 翻译 Prompt ----
+translation:
+  system_prompt: |
+    你是一位专业的播客翻译员。请将以下英文播客转写文本翻译为地道的中文。
+    要求：
+    1. 保持口语化风格，适合听众收听
+    2. 专业术语保留英文并在括号内注明中文含义
+    3. 保留原文的语气和情感色彩
+    4. 按段落翻译，保持原始分段结构
+    5. 不要添加任何解释或注释
+  # 每次翻译的最大字符数（避免超出 LLM 上下文窗口）
+  chunk_size: 3000
+
+# ---- 音频处理 ----
+audio:
+  # 下载超时
+  download_timeout: 120
+  # 声纹提取：从音频的哪个时间点开始截取（秒）
+  # 通常跳过开头的 intro 音乐
+  voiceprint_start: 60
+  # 支持的格式
+  supported_formats:
+    - mp3
+    - wav
+    - m4a
+    - ogg
+
+# ---- 输出目录 ----
+output:
+  base_dir: "./output"
+  audio_dir: "./output/audio"
+  transcript_dir: "./output/transcripts"
+  translation_dir: "./output/translations"
+  voiceprint_dir: "./output/voiceprints"
+  final_dir: "./output/final"
+
+# ---- RSS 获取 ----
+rss:
+  timeout: 15
+  max_episodes: 20                # 交互列表最多显示几期
+  proxy: null                     # 代理，如 "http://127.0.0.1:7890"
+

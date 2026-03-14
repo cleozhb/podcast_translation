@@ -1,170 +1,309 @@
-"""播客翻译工具 CLI 入口。
+"""
+main.py
+=======
+播客翻译工作流入口。
+交互式选择播客和节目 → 启动翻译工作流。
 
-使用方式:
-    # 列出 RSS feed 中的 episode
-    python main.py --feed <rss_url> --list
-
-    # 翻译最新 N 个 episode
-    python main.py --feed <rss_url> --episodes 3
-    python main.py --feed <https://feeds.npr.org/510289/podcast.xml> --episodes 1
-
-    # 使用 config.yaml 中配置的所有 feed
-    python main.py --all
-
-    # 使用本地 MP3 文件测试完整工作流
-    python main.py test --file /path/to/audio.mp3
-    python main.py test --file /path/to/audio.mp3 --name "播客名" --title "节目标题"
-
-    # 查看处理进度
-    python main.py --status
+使用方法:
+    python main.py                    # 交互式选择
+    python main.py --url <mp3_url>    # 直接指定音频 URL
+    python main.py --skip-tts         # 跳过 TTS（只做转写+翻译）
 """
 
-import argparse
+import os
 import sys
+import yaml
+import argparse
+import feedparser
+import requests
 
-from loguru import logger
-
-
-def setup():
-    """初始化日志和配置。"""
-    from utils.logger import setup_logger
-
-    setup_logger()
-    from config import load_settings
-
-    return load_settings()
+from core.pipeline import Pipeline
+from providers.base import STTProvider, LLMProvider, TTSProvider, StorageProvider
 
 
-def cmd_list(args):
-    """列出 RSS feed 中的 episode 列表。"""
-    from rss.feed_parser import fetch_episodes
+# ============================================================
+# 已验证有效的 RSS Feed（来自之前的验证工作）
+# ============================================================
+FEEDS = [
+    ("科技", "Lex Fridman Podcast", "https://lexfridman.com/feed/podcast/"),
+    ("科技", "a16z Podcast", "https://feeds.simplecast.com/JGE3yC0V"),
+    ("科技", "The Vergecast", "https://feeds.megaphone.fm/vergecast"),
+    ("科技", "Hard Fork (NYT)", "https://feeds.simplecast.com/l2i9YnTd"),
+    ("科技", "The Changelog", "https://changelog.com/podcast/feed"),
+    ("科技", "Darknet Diaries", "https://feeds.megaphone.fm/darknetdiaries"),
+    ("科技", "Practical AI", "https://changelog.com/practicalai/feed"),
+    ("科技", "Acquired", "https://acquired.libsyn.com/rss"),
+    ("科技", "TWIML", "https://twimlai.libsyn.com/rss"),
+    ("科技", "Machine Learning Street Talk", "https://anchor.fm/s/1e4a0eac/podcast/rss"),
+    ("科技", "Accidental Tech Podcast", "https://atp.fm/episodes?format=rss"),
+    ("科技", "Latent Space", "https://api.substack.com/feed/podcast/1084089.rss"),
+    ("商业", "How I Built This (NPR)", "https://feeds.npr.org/510313/podcast.xml"),
+    ("商业", "Planet Money (NPR)", "https://feeds.npr.org/510289/podcast.xml"),
+    ("商业", "Freakonomics Radio", "https://feeds.simplecast.com/Y8lFbOT4"),
+    ("商业", "The Indicator (NPR)", "https://feeds.npr.org/510325/podcast.xml"),
+    ("商业", "Invest Like the Best", "https://feeds.megaphone.fm/investlikethebest"),
+    ("商业", "The Knowledge Project", "https://theknowledgeproject.libsyn.com/rss"),
+    ("商业", "Masters of Scale", "https://rss.art19.com/masters-of-scale"),
+    ("商业", "Prof G Markets", "https://feeds.megaphone.fm/profgmarkets"),
+    ("商业", "Business Wars", "https://rss.art19.com/business-wars"),
+    ("商业", "20VC with Harry Stebbings", "https://thetwentyminutevc.libsyn.com/rss"),
+    ("商业", "Lenny's Podcast", "https://www.lennysnewsletter.com/feed"),
+    ("生命科学", "Huberman Lab", "https://feeds.megaphone.fm/hubermanlab"),
+    ("生命科学", "Science Magazine Podcast", "https://www.science.org/rss/podcast.xml"),
+    ("生命科学", "Radiolab", "https://feeds.simplecast.com/EmVW7VGp"),
+    ("生命科学", "The Peter Attia Drive", "https://peterattiadrive.libsyn.com/rss"),
+    ("生命科学", "The Naked Scientists", "https://www.thenakedscientists.com/naked_scientists_podcast.xml"),
+    ("生命科学", "Short Wave (NPR)", "https://feeds.npr.org/510351/podcast.xml"),
+    ("生命科学", "Hidden Brain (NPR)", "https://feeds.simplecast.com/kwWQlnMM"),
+    ("生命科学", "Life Kit (NPR)", "https://feeds.npr.org/510338/podcast.xml"),
+    ("生命科学", "BrainInspired", "https://braininspired.co/feed/podcast/brain-inspired/"),
+]
 
-    episodes = fetch_episodes(args.feed)
-    print(f"\n{'=' * 60}")
-    print(f"播客: {episodes[0].podcast_name if episodes else 'N/A'}")
-    print(f"共 {len(episodes)} 个 episode")
-    print(f"{'=' * 60}\n")
 
-    for i, ep in enumerate(episodes[:20], 1):
-        duration = (
-            f"{ep.duration_seconds // 60}分钟" if ep.duration_seconds else "未知时长"
-        )
-        print(f"  {i:2d}. [{ep.published_date.strftime('%Y-%m-%d')}] {ep.title}")
-        print(f"      时长: {duration}  格式: {ep.audio_type}")
-        print(f"      音频: {ep.audio_url[:80]}...")
-        print()
+# ============================================================
+# 加载配置
+# ============================================================
+def load_config(path: str = "config.yaml") -> dict:
+    if not os.path.exists(path):
+        print(f"  ⚠️  配置文件 {path} 不存在，使用默认配置")
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
-def cmd_translate(args):
-    """翻译指定 feed 的 episode。"""
-    settings = setup()
-    from pipeline.orchestrator import PodcastPipeline
+# ============================================================
+# Provider 工厂
+# ============================================================
+def create_providers(config: dict):
+    """根据配置创建 Provider 实例"""
+    active = config.get("active_providers", {})
 
-    pipeline = PodcastPipeline(settings)
-    pipeline.process_feed(args.feed, max_episodes=args.episodes)
+    # STT
+    stt_name = active.get("stt", "dashscope")
+    if stt_name == "dashscope":
+        from providers.dashscope_stt import DashScopeSTT
+        stt = DashScopeSTT(config)
+    elif stt_name == "baidu":
+        from providers.baidu_stt import BaiduSTT
+        stt = BaiduSTT(config)
+    else:
+        raise ValueError(f"未知 STT provider: {stt_name}")
+
+    # LLM
+    llm_name = active.get("llm", "dashscope")
+    if llm_name == "dashscope":
+        from providers.dashscope_llm import DashScopeLLM
+        llm = DashScopeLLM(config)
+    elif llm_name == "baidu":
+        from providers.baidu_llm import BaiduLLM
+        llm = BaiduLLM(config)
+    else:
+        raise ValueError(f"未知 LLM provider: {llm_name}")
+
+    # TTS
+    tts_name = active.get("tts", "cosyvoice")
+    if tts_name == "cosyvoice":
+        from providers.cosyvoice_tts import CosyVoiceTTS
+        tts = CosyVoiceTTS(config)
+    else:
+        raise ValueError(f"未知 TTS provider: {tts_name}")
+
+    # Storage (OSS)
+    storage = None
+    if config.get("oss", {}).get("access_key_id"):
+        from providers.oss_storage import OSSStorage
+        storage = OSSStorage(config)
+
+    return stt, llm, tts, storage
 
 
-def cmd_all(args):
-    """翻译 config.yaml 中所有 feed。"""
-    settings = setup()
-    from pipeline.orchestrator import PodcastPipeline
+# ============================================================
+# 时长解析（复用之前脚本的逻辑）
+# ============================================================
+def parse_duration(entry) -> int | None:
+    dur = entry.get("itunes_duration", "")
+    if dur:
+        dur = str(dur).strip()
+        if dur.isdigit():
+            return int(dur)
+        parts = dur.split(":")
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            pass
+    return None
 
-    if not settings.rss_feeds:
-        print("config.yaml 中未配置 RSS feed，请先添加。")
+
+def fmt_dur(s):
+    if s is None:
+        return "??:??"
+    h, m = s // 3600, (s % 3600) // 60
+    return f"{h}h{m:02d}m" if h else f"{m}m{s % 60:02d}s"
+
+
+def get_audio_url(entry):
+    enc = entry.get("enclosures", [])
+    if enc:
+        return enc[0].get("href", "")
+    for link in entry.get("links", []):
+        if link.get("type", "").startswith("audio"):
+            return link.get("href", "")
+    return ""
+
+
+# ============================================================
+# 交互式选择
+# ============================================================
+def interactive_select(config: dict):
+    """交互式选择播客和节目，返回 (podcast_name, episode_title, audio_url)"""
+
+    proxy = config.get("rss", {}).get("proxy")
+    timeout = config.get("rss", {}).get("timeout", 15)
+    max_eps = config.get("rss", {}).get("max_episodes", 20)
+
+    # Step 1: 选分类
+    cats = sorted(set(f[0] for f in FEEDS))
+    print("\n  📂 选择分类:")
+    print("   0. 全部")
+    for i, c in enumerate(cats, 1):
+        count = sum(1 for f in FEEDS if f[0] == c)
+        print(f"   {i}. {c} ({count})")
+
+    choice = input("\n  输入编号: ").strip()
+    if choice.isdigit() and 0 < int(choice) <= len(cats):
+        selected_cat = cats[int(choice) - 1]
+        show_feeds = [f for f in FEEDS if f[0] == selected_cat]
+    else:
+        show_feeds = FEEDS
+
+    # Step 2: 选播客
+    print(f"\n  🎧 选择播客:")
+    for i, (cat, name, url) in enumerate(show_feeds, 1):
+        print(f"   {i:2d}. [{cat}] {name}")
+
+    choice = input(f"\n  输入编号 (1-{len(show_feeds)}): ").strip()
+    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(show_feeds):
+        print("  ❌ 无效选择")
         sys.exit(1)
 
-    pipeline = PodcastPipeline(settings)
-    for feed_url in settings.rss_feeds:
-        try:
-            pipeline.process_feed(feed_url)
-        except Exception as e:
-            logger.error(f"Feed 处理失败: {feed_url} - {e}")
+    cat, podcast_name, rss_url = show_feeds[int(choice) - 1]
+
+    # Step 3: 获取节目列表
+    print(f"\n  📡 获取 [{podcast_name}] 的节目列表...")
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    headers = {"User-Agent": "Mozilla/5.0 (PodcastTranslator/1.0)"}
+
+    try:
+        resp = requests.get(rss_url, timeout=timeout, headers=headers, proxies=proxies)
+        feed = feedparser.parse(resp.content)
+    except Exception as e:
+        print(f"  ❌ 获取失败: {e}")
+        sys.exit(1)
+
+    if not feed.entries:
+        print("  ❌ 未找到节目")
+        sys.exit(1)
+
+    # Step 4: 选节目
+    entries = feed.entries[:max_eps]
+    print(f"\n  📋 最近 {len(entries)} 期:")
+    for i, entry in enumerate(entries, 1):
+        title = entry.get("title", "")[:60]
+        dur = parse_duration(entry)
+        dur_str = fmt_dur(dur)
+        pub = entry.get("published", "")[:16]
+        print(f"   {i:2d}. [{dur_str:>7s}] {title}  ({pub})")
+
+    choice = input(f"\n  选择节目编号 (1-{len(entries)}): ").strip()
+    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(entries):
+        print("  ❌ 无效选择")
+        sys.exit(1)
+
+    entry = entries[int(choice) - 1]
+    episode_title = entry.get("title", "unknown")
+    audio_url = get_audio_url(entry)
+
+    if not audio_url:
+        print("  ❌ 未找到音频链接")
+        sys.exit(1)
+
+    print(f"\n  ✅ 已选择:")
+    print(f"     播客: {podcast_name}")
+    print(f"     节目: {episode_title}")
+    print(f"     音频: {audio_url[:80]}...")
+
+    return podcast_name, episode_title, audio_url
 
 
-def cmd_test(args):
-    """使用本地 MP3 文件测试完整工作流。"""
-    settings = setup()
-    from pipeline.orchestrator import PodcastPipeline
-
-    pipeline = PodcastPipeline(settings)
-    pipeline.process_local_file(
-        audio_path=args.file,
-        podcast_name=args.name,
-        episode_title=args.title,
-    )
-
-
-def cmd_status(args):
-    """查看处理进度。"""
-    from pipeline.progress_tracker import ProgressTracker
-
-    tracker = ProgressTracker()
-    records = tracker.list_all()
-    tracker.close()
-
-    if not records:
-        print("暂无处理记录。")
-        return
-
-    print(f"\n{'状态':<12} {'播客':<20} {'标题':<30} {'更新时间'}")
-    print("-" * 80)
-    for r in records:
-        status_icon = {
-            "completed": "✓",
-            "failed": "✗",
-            "pending": "○",
-        }.get(r["status"], "●")
-        print(
-            f"  {status_icon} {r['status']:<10} {(r['podcast_name'] or '')[:18]:<20} "
-            f"{(r['title'] or '')[:28]:<30} {r['updated_at'] or ''}"
-        )
-    print()
-
-
+# ============================================================
+# 主函数
+# ============================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="英文播客自动翻译为中文（含声音克隆）"
-    )
-    subparsers = parser.add_subparsers(dest="command", help="可用命令")
-
-    # list 命令
-    list_parser = subparsers.add_parser("list", help="列出 RSS feed 中的 episode")
-    list_parser.add_argument("--feed", required=True, help="RSS feed URL")
-
-    # translate 命令
-    trans_parser = subparsers.add_parser("translate", help="翻译指定 feed")
-    trans_parser.add_argument("--feed", required=True, help="RSS feed URL")
-    trans_parser.add_argument(
-        "--episodes", type=int, default=1, help="处理的 episode 数量（默认 1）"
-    )
-
-    # all 命令
-    subparsers.add_parser("all", help="翻译 config.yaml 中所有 feed")
-
-    # test 命令
-    test_parser = subparsers.add_parser("test", help="使用本地 MP3 文件测试完整工作流")
-    test_parser.add_argument("--file", required=True, help="本地 MP3 文件路径")
-    test_parser.add_argument("--name", default="本地测试", help="播客名称（默认: 本地测试）")
-    test_parser.add_argument("--title", default="本地音频测试", help="节目标题（默认: 本地音频测试）")
-
-    # status 命令
-    subparsers.add_parser("status", help="查看处理进度")
-
+    parser = argparse.ArgumentParser(description="播客翻译工作流")
+    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("--url", type=str, help="直接指定音频 URL（跳过交互选择）")
+    parser.add_argument("--name", type=str, default="podcast", help="播客名称（配合 --url 使用）")
+    parser.add_argument("--title", type=str, default="episode", help="节目标题（配合 --url 使用）")
+    parser.add_argument("--skip-tts", action="store_true", help="跳过 TTS 合成")
+    parser.add_argument("--skip-voiceprint", action="store_true", help="跳过声纹提取")
     args = parser.parse_args()
 
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
+    # 加载配置
+    config = load_config(args.config)
 
-    # 执行对应命令
-    commands = {
-        "list": cmd_list,
-        "translate": cmd_translate,
-        "all": cmd_all,
-        "test": cmd_test,
-        "status": cmd_status,
-    }
-    commands[args.command](args)
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║   🎧 播客翻译工作流 Podcast Translator      ║")
+    print("║   英文播客 → 中文音频（声音克隆）            ║")
+    print("╚══════════════════════════════════════════════╝")
+
+    # 选择节目
+    if args.url:
+        podcast_name = args.name
+        episode_title = args.title
+        audio_url = args.url
+    else:
+        podcast_name, episode_title, audio_url = interactive_select(config)
+
+    # 确认启动
+    skip_steps = []
+    if args.skip_tts:
+        skip_steps.append("tts")
+    if args.skip_voiceprint:
+        skip_steps.append("voiceprint")
+
+    print()
+    if skip_steps:
+        print(f"  ⏭️  跳过步骤: {', '.join(skip_steps)}")
+
+    confirm = input("\n  确认启动工作流？(y/n): ").strip().lower()
+    if confirm != "y":
+        print("  👋 已取消")
+        return
+
+    # 创建 Provider
+    stt, llm, tts, storage = create_providers(config)
+
+    # 创建并运行 Pipeline
+    pipeline = Pipeline(config, stt, llm, tts, storage)
+    ctx = pipeline.run(
+        audio_url=audio_url,
+        podcast_name=podcast_name,
+        episode_title=episode_title,
+        skip_steps=skip_steps,
+    )
+
+    # 输出最终结果路径
+    print()
+    if ctx.transcript_path:
+        print(f"  📄 英文转写: {ctx.transcript_path}")
+    if ctx.translation_path:
+        print(f"  📄 中文翻译: {ctx.translation_path}")
+    if ctx.final_audio_path:
+        print(f"  🔊 中文音频: {ctx.final_audio_path}")
 
 
 if __name__ == "__main__":

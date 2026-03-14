@@ -1,24 +1,24 @@
-# RSS 解析
-feedparser>=6.0.10
+# 此文件仅供非 uv 用户参考，推荐使用 uv sync 管理依赖
+#
+# uv 用户请直接:
+#   uv sync                     # 安装核心依赖
+#   uv sync --extra baidu       # 额外安装百度千帆
+#   uv sync --extra whisper     # 额外安装本地 Whisper
+#   uv sync --extra dev         # 额外安装开发工具
+#
+# pip 用户:
+#   pip install -r requirements.txt
 
-# 音频处理（需系统安装 ffmpeg）
-pydub>=0.25.1
-
-# HTTP 请求
-requests>=2.31.0
-
-# 阿里云 SDK
-dashscope>=1.14.0
-aliyun-nls>=0.0.1
-oss2>=2.18.0
-
-# 配置管理
-pydantic-settings>=2.0.0
+feedparser>=6.0
+requests>=2.28
+pydub>=0.25
 pyyaml>=6.0
-python-dotenv>=1.0.0
+dashscope>=1.20
+oss2>=2.18
+certifi>=2023.0  # SSL certificate bundle for websocket connections
 
-# 进度条
-tqdm>=4.66.0
+# 可选：百度千帆
+# qianfan>=0.4
 
-# 日志
-loguru>=0.7.0
+# 可选：本地 Whisper
+# faster-whisper>=1.0

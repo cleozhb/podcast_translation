@@ -1,18 +1,54 @@
 [project]
-name = "podcast-translation"
+name = "podcast-translator"
 version = "0.1.0"
-description = "Add your description here"
+description = "英文播客 → 中文音频（声音克隆）AI 工作流"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "feedparser>=6.0.10",
-    "pydub>=0.25.1",
-    "requests>=2.31.0",
-    "dashscope>=1.25.6",
-    "oss2>=2.18.0",
-    "pydantic-settings>=2.0.0",
+    # RSS & 网络
+    "feedparser>=6.0",
+    "requests>=2.28",
+    # 音频处理
+    "pydub>=0.25",
+    # 配置
     "pyyaml>=6.0",
-    "python-dotenv>=1.0.0",
-    "tqdm>=4.66.0",
-    "loguru>=0.7.0",
+    # 阿里云
+    "dashscope>=1.20",
+    "oss2>=2.18",
 ]
+
+[project.optional-dependencies]
+# 百度千帆（按需安装）
+baidu = [
+    "qianfan>=0.4",
+]
+# 本地 Whisper（按需安装）
+whisper = [
+    "faster-whisper>=1.0",
+]
+# 开发工具
+dev = [
+    "ruff>=0.4",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+# 注册命令行入口
+podcast-translator = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.hatch.build.targets.wheel]
+# Include core and providers directories in the wheel
+packages = ["core", "providers"]
+# Also include main.py at the root
+include = ["main.py"]
