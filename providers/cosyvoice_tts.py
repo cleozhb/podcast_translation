@@ -61,6 +61,13 @@ class CosyVoiceTTS(TTSProvider):
         # 为每个不同的声纹 URL 缓存对应的音色 ID
         self._voice_cache = {}
         
+        # 语音合成参数配置
+        # 语速：0.5-2.0，默认 1.0（正常语速）
+        self.speech_rate = cv.get("speech_rate", 1.0)
+        # 音调：0.5-2.0，默认 1.0（原调）
+        self.pitch_rate = cv.get("pitch_rate", 1.0)
+        # 音量：0-100，默认 50
+        self.volume = cv.get("volume", 50)
         # 声音克隆相关配置 - 移除了持久化的 voice_id 和 voiceprint_url
         # 每次都为不同的声纹创建新音色（多说话人场景）
 
@@ -119,6 +126,19 @@ class CosyVoiceTTS(TTSProvider):
             print(f"     使用默认音色：longxiaochun")
 
         try:
+            # 添加语音控制参数到已有的 params 中
+            # 语速：0.5-2.0，默认 1.0
+            if self.speech_rate != 1.0:
+                params["speech_rate"] = self.speech_rate
+            # 音调：0.5-2.0，默认 1.0
+            if self.pitch_rate != 1.0:
+                params["pitch_rate"] = self.pitch_rate
+            # 音量：0-100，默认 50
+            if self.volume != 50:
+                params["volume"] = self.volume
+            
+            print(f"     语速：{self.speech_rate}x, 音调：{self.pitch_rate}x, 音量：{self.volume}")
+            
             synthesizer = SpeechSynthesizer(**params)
             
             # 非流式调用：call() 方法直接返回完整的二进制音频数据 (bytes)

@@ -25,8 +25,13 @@ baidu:
 cosyvoice:
   api_key: "sk-"      # 同 DashScope API Key
   model: "cosyvoice-v3.5-flash"
-  # 声纹音频要求：10-30秒，单人说话，无背景音乐
+  # 声纹音频要求：10-30 秒，单人说话，无背景音乐
   voiceprint_duration: 20                  # 提取声纹片段的目标时长（秒）
+  
+  # 语音合成参数（可选）
+  speech_rate: 1.5                         # 语速：取值范围 0.5-2.0，系统默认值为 1.0；数值大于 1.0 表示加速（如 1.2 为正常速度的 120%），小于 1.0 表示减速（如 0.8 为正常速度的 80%），可根据播客内容节奏调整
+  pitch_rate: 1.0                          # 音调：取值范围 0.5-2.0，系统默认值为 1.0；影响语音的高低音调，建议保持默认以获得最自然的听感
+  volume: 50                               # 音量：取值范围 0-100，系统默认值为 50；控制输出音频的整体响度，一般无需调整
 
 # ---- 阿里云 OSS（TTS 声音克隆需要公网 URL）----
 oss:
@@ -55,14 +60,37 @@ audio:
   # 下载超时
   download_timeout: 120
   # 声纹提取：从音频的哪个时间点开始截取（秒）
-  # 通常跳过开头的 intro 音乐
-  voiceprint_start: 60
+
   # 支持的格式
   supported_formats:
     - mp3
     - wav
     - m4a
     - ogg
+
+
+# 说话人分离方案
+diarization:
+  # 可选: pyannote | dashscope | energy
+  # pyannote:   本地模型，效果最好，需 HuggingFace token + GPU/MPS
+  # dashscope:  阿里云 API，需音频公网 URL，无需本地 GPU
+  # energy:     简易能量检测 fallback，不区分说话人
+  method: dashscope
+
+  # pyannote 专用配置
+  pyannote:
+    hf_token: "your-huggingface-token"   # https://huggingface.co/settings/tokens
+    # 已知说话人数设为具体数字，未知设为 null 自动检测
+    num_speakers: null
+    min_speakers: 1
+    max_speakers: 5
+
+  # 声纹提取
+  voiceprint:
+    target_duration: 20        # 目标声纹时长（秒）
+    min_segment_duration: 5    # 最短可用片段（秒）
+    sample_rate: 16000
+
 
 # ---- 输出目录 ----
 output:

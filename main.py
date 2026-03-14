@@ -41,7 +41,7 @@ FEEDS = [
     ("科技", "Machine Learning Street Talk", "https://anchor.fm/s/1e4a0eac/podcast/rss"),
     ("科技", "Accidental Tech Podcast", "https://atp.fm/episodes?format=rss"),
     ("科技", "Latent Space", "https://api.substack.com/feed/podcast/1084089.rss"),
-    ("商业", "Lenny's Podcast", "https://www.lennysnewsletter.com/feed"),
+    ("商业", "Lenny's Podcast", "https://api.substack.com/feed/podcast/10845.rss"),
     ("商业", "How I Built This (NPR)", "https://feeds.npr.org/510313/podcast.xml"),
     ("商业", "Planet Money (NPR)", "https://feeds.npr.org/510289/podcast.xml"),
     ("商业", "Freakonomics Radio", "https://feeds.simplecast.com/Y8lFbOT4"),
