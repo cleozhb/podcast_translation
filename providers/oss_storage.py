@@ -41,15 +41,23 @@ class OSSStorage(StorageProvider):
             公网可访问的 URL
         """
         if remote_key is None:
+            # 使用安全的文件名，避免特殊字符和 URL 编码问题
+            import re
+            import time
+            
             filename = os.path.basename(local_path)
-            remote_key = f"{self.prefix}{filename}"
+            # 清理文件名中的非法字符
+            safe_filename = re.sub(r'[^\w\-_.]', '_', filename)
+            # 添加时间戳避免重名
+            timestamp = int(time.time())
+            remote_key = f"{self.prefix}{timestamp}_{safe_filename}"
 
-        print(f"  ☁️  [OSS] 上传: {local_path} -> {remote_key}")
+        print(f"  ☁️  [OSS] 上传：{local_path} -> {remote_key}")
 
         self.bucket.put_object_from_file(remote_key, local_path)
         url = f"{self.base_url}/{remote_key}"
 
-        print(f"  ✅ 上传完成: {url}")
+        print(f"  ✅ 上传完成：{url}")
         return url
 
     def delete(self, remote_key: str) -> bool:
@@ -78,3 +86,4 @@ class OSSStorage(StorageProvider):
         ext = os.path.splitext(local_path)[1] or ".wav"
         remote_key = f"{self.prefix}{safe_name}_voiceprint{ext}"
         return self.upload(local_path, remote_key)
+

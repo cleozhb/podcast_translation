@@ -8,6 +8,8 @@ main.py
     python main.py                    # 交互式选择
     python main.py --url <mp3_url>    # 直接指定音频 URL
     python main.py --skip-tts         # 跳过 TTS（只做转写+翻译）
+    python main.py --skip-voiceprint         # 跳过声纹提取（只做转写+翻译）
+    python main.py --skip-voiceprint --skip-tts         # 跳过声纹提取（只做转写+翻译）
 """
 
 import os
@@ -26,7 +28,9 @@ from providers.base import STTProvider, LLMProvider, TTSProvider, StorageProvide
 # ============================================================
 FEEDS = [
     ("科技", "Lex Fridman Podcast", "https://lexfridman.com/feed/podcast/"),
+    ("科技", "Y Combinator", "https://anchor.fm/s/8c1524bc/podcast/rss"),
     ("科技", "a16z Podcast", "https://feeds.simplecast.com/JGE3yC0V"),
+    ("科技", "Moonshots", "https://feeds.megaphone.fm/DVVTS2890392624"),
     ("科技", "The Vergecast", "https://feeds.megaphone.fm/vergecast"),
     ("科技", "Hard Fork (NYT)", "https://feeds.simplecast.com/l2i9YnTd"),
     ("科技", "The Changelog", "https://changelog.com/podcast/feed"),
@@ -37,6 +41,7 @@ FEEDS = [
     ("科技", "Machine Learning Street Talk", "https://anchor.fm/s/1e4a0eac/podcast/rss"),
     ("科技", "Accidental Tech Podcast", "https://atp.fm/episodes?format=rss"),
     ("科技", "Latent Space", "https://api.substack.com/feed/podcast/1084089.rss"),
+    ("商业", "Lenny's Podcast", "https://www.lennysnewsletter.com/feed"),
     ("商业", "How I Built This (NPR)", "https://feeds.npr.org/510313/podcast.xml"),
     ("商业", "Planet Money (NPR)", "https://feeds.npr.org/510289/podcast.xml"),
     ("商业", "Freakonomics Radio", "https://feeds.simplecast.com/Y8lFbOT4"),
@@ -47,7 +52,7 @@ FEEDS = [
     ("商业", "Prof G Markets", "https://feeds.megaphone.fm/profgmarkets"),
     ("商业", "Business Wars", "https://rss.art19.com/business-wars"),
     ("商业", "20VC with Harry Stebbings", "https://thetwentyminutevc.libsyn.com/rss"),
-    ("商业", "Lenny's Podcast", "https://www.lennysnewsletter.com/feed"),
+    ("生命科学", "BrainInspired", "https://braininspired.co/feed/podcast/brain-inspired/"),
     ("生命科学", "Huberman Lab", "https://feeds.megaphone.fm/hubermanlab"),
     ("生命科学", "Science Magazine Podcast", "https://www.science.org/rss/podcast.xml"),
     ("生命科学", "Radiolab", "https://feeds.simplecast.com/EmVW7VGp"),
@@ -56,7 +61,6 @@ FEEDS = [
     ("生命科学", "Short Wave (NPR)", "https://feeds.npr.org/510351/podcast.xml"),
     ("生命科学", "Hidden Brain (NPR)", "https://feeds.simplecast.com/kwWQlnMM"),
     ("生命科学", "Life Kit (NPR)", "https://feeds.npr.org/510338/podcast.xml"),
-    ("生命科学", "BrainInspired", "https://braininspired.co/feed/podcast/brain-inspired/"),
 ]
 
 
