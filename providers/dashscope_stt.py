@@ -30,6 +30,7 @@ class DashScopeSTT(STTProvider):
             model=self.model,
             file_urls=[audio_path] if audio_path.startswith("http") else None,
             language_hints=[language],
+            speaker_diary_enabled=True,  # 启用说话人分离
         )
 
         # 如果是本地文件，使用异步转写
@@ -38,6 +39,7 @@ class DashScopeSTT(STTProvider):
                 model=self.model,
                 file_urls=[],  # 本地文件需要先上传
                 language_hints=[language],
+                speaker_diary_enabled=True,  # 启用说话人分离
             )
             # 注意：实际使用时本地文件需要先上传到 OSS
             # 这里给出框架，具体实现需要配合 oss_storage
@@ -57,6 +59,7 @@ class DashScopeSTT(STTProvider):
                             start=sent.get("begin_time", 0) / 1000,
                             end=sent.get("end_time", 0) / 1000,
                             text=sent.get("text", ""),
+                            speaker=sent.get("speaker", "SPEAKER_00"),  # 提取说话人标签
                         )
                         result.segments.append(seg)
 
@@ -85,6 +88,7 @@ class DashScopeSTT(STTProvider):
             model=self.model,
             file_urls=[audio_url],
             language_hints=[language],
+            speaker_diary_enabled=True,  # 启用说话人分离
         )
 
         # 等待异步任务完成
@@ -115,6 +119,7 @@ class DashScopeSTT(STTProvider):
                         start=sent.get("begin_time", 0) / 1000,
                         end=sent.get("end_time", 0) / 1000,
                         text=sent.get("text", ""),
+                        speaker=sent.get("speaker", "SPEAKER_00"),  # 提取说话人标签
                     )
                     result.segments.append(seg)
 

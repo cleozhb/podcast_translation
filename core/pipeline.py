@@ -13,7 +13,7 @@ from providers.base import (
     STTProvider, LLMProvider, TTSProvider, StorageProvider,
     TranscriptResult, TranslationResult, TTSResult,
 )
-from core.audio_utils import download_audio, extract_voiceprint
+from core.audio_utils import download_audio, extract_voiceprints_auto
 
 
 @dataclass
@@ -29,16 +29,20 @@ class PipelineContext:
     local_audio_path: str = ""
 
     # Step 2: 声纹
-    voiceprint_local_path: str = ""
+    voiceprints: list = field(default_factory=list)          # list[VoiceprintInfo]
+    voiceprint_local_path: str = ""                          # 主持人声纹（兼容单人模式）
     voiceprint_oss_url: str = ""
+    voiceprint_oss_urls: dict = field(default_factory=dict)  # {speaker_id: oss_url}
 
-    # Step 3: STT
+    # Step 3: STT（带说话人标签）
     transcript: Optional[TranscriptResult] = None
     transcript_path: str = ""
 
-    # Step 4: 翻译
+    # Step 4: 翻译（按说话人分段翻译）
     translation: Optional[TranslationResult] = None
     translation_path: str = ""
+    # 带说话人标签的翻译段落: [{speaker, original, translated}, ...]
+    speaker_translations: list = field(default_factory=list)
 
     # Step 5: TTS
     tts_result: Optional[TTSResult] = None
@@ -88,9 +92,14 @@ class Pipeline:
 
         # 音频配置
         ac = config.get("audio", {})
-        self.voiceprint_start = ac.get("voiceprint_start", 60)
-        self.voiceprint_duration = config.get("cosyvoice", {}).get("voiceprint_duration", 20)
         self.download_timeout = ac.get("download_timeout", 120)
+
+        # 说话人分离配置
+        dc = config.get("diarization", {})
+        self.diarization_method = dc.get("method", "energy")
+        self.pyannote_config = dc.get("pyannote", {})
+        vp_config = dc.get("voiceprint", {})
+        self.voiceprint_duration = vp_config.get("target_duration", 20)
 
         # 代理
         self.proxy = config.get("rss", {}).get("proxy")
@@ -201,23 +210,52 @@ class Pipeline:
         if not ctx.local_audio_path:
             raise ValueError("音频未下载")
 
-        # 提取声纹片段
-        ctx.voiceprint_local_path = extract_voiceprint(
+        # 如果用 dashscope 分离，需要先上传音频拿到公网 URL
+        audio_url = None
+        dashscope_key = None
+        if self.diarization_method == "dashscope" and self.storage:
+            audio_url = self.storage.upload(ctx.local_audio_path)
+            dashscope_key = self.config.get("dashscope", {}).get("api_key")
+
+        # 一键：说话人分离 + 声纹提取
+        voiceprints = extract_voiceprints_auto(
             audio_path=ctx.local_audio_path,
             output_dir=self.voiceprint_dir,
-            start_sec=self.voiceprint_start,
-            duration_sec=self.voiceprint_duration,
+            method=self.diarization_method,
+            target_duration=self.voiceprint_duration,
+            hf_token=self.pyannote_config.get("hf_token"),
+            num_speakers=self.pyannote_config.get("num_speakers"),
+            audio_url=audio_url,
+            dashscope_api_key=dashscope_key,
         )
 
-        # 上传到 OSS
+        if not voiceprints:
+            print("  ⚠️ 未能提取声纹，TTS 将使用默认音色")
+            return
+
+        ctx.voiceprints = voiceprints
+
+        # 上传所有说话人的声纹到 OSS
         if self.storage:
-            ctx.voiceprint_oss_url = self.storage.upload_voiceprint(
-                ctx.voiceprint_local_path, ctx.podcast_name
-            )
-            print(f"  ✅ 声纹已上传到 OSS: {ctx.voiceprint_oss_url}")
+            for vp in voiceprints:
+                oss_url = self.storage.upload_voiceprint(
+                    vp.audio_path,
+                    f"{ctx.podcast_name}_{vp.speaker}",
+                )
+                ctx.voiceprint_oss_urls[vp.speaker] = oss_url
+                if vp.is_host:
+                    ctx.voiceprint_oss_url = oss_url
+                    ctx.voiceprint_local_path = vp.audio_path
+
+            print(f"  ☁️ 已上传 {len(ctx.voiceprint_oss_urls)} 个声纹到 OSS")
+            for spk, url in ctx.voiceprint_oss_urls.items():
+                role = "主持人" if any(vp.speaker == spk and vp.is_host for vp in voiceprints) else "嘉宾"
+                print(f"     {spk} [{role}]: {url[:]}...")
         else:
+            # 没有 OSS，只用主持人声纹
+            host_vp = next((vp for vp in voiceprints if vp.is_host), voiceprints[0])
+            ctx.voiceprint_local_path = host_vp.audio_path
             print("  ⚠️ 未配置 OSS，声纹不会上传（TTS 将使用默认音色）")
-            ctx.voiceprint_oss_url = None  # 明确设置为 None
 
     def _transcribe(self, ctx: PipelineContext, skip: set):
         if not ctx.local_audio_path:
@@ -232,6 +270,10 @@ class Pipeline:
             ctx.transcript = self.stt.transcribe_with_url(audio_url)
         else:
             ctx.transcript = self.stt.transcribe(ctx.local_audio_path)
+
+        # 如果已有说话人分离结果，将时间戳对齐到转写文本
+        if ctx.voiceprints and self.diarization_method != "energy":
+            self._align_diarization_to_transcript(ctx)
 
         # 保存转写文本
         os.makedirs(self.transcript_dir, exist_ok=True)
@@ -248,13 +290,14 @@ class Pipeline:
         if not ctx.transcript:
             raise ValueError("转写结果为空")
 
-        text = ctx.transcript.to_plain_text()
+        has_speakers = any(seg.speaker for seg in ctx.transcript.segments)
 
-        # 分块翻译
-        chunks = self._split_to_chunks(text, self.chunk_size)
-        print(f"  📝 文本长度: {len(text)} 字，分为 {len(chunks)} 段翻译")
-
-        ctx.translation = self.llm.translate_chunks(chunks, self.system_prompt)
+        if has_speakers and len(ctx.voiceprint_oss_urls) > 1:
+            # 多说话人模式：按说话人分段翻译，保留标签
+            self._translate_multi_speaker(ctx)
+        else:
+            # 单人模式：整段翻译
+            self._translate_single(ctx)
 
         # 保存翻译
         os.makedirs(self.translation_dir, exist_ok=True)
@@ -264,8 +307,136 @@ class Pipeline:
 
         ctx.translation_path = os.path.join(self.translation_dir, f"{safe_name}_zh.txt")
         with open(ctx.translation_path, "w", encoding="utf-8") as f:
-            f.write(ctx.translation.translated_text)
+            if ctx.speaker_translations:
+                for item in ctx.speaker_translations:
+                    f.write(f"[{item['speaker']}] {item['translated']}\n\n")
+            else:
+                f.write(ctx.translation.translated_text)
         print(f"  💾 翻译文本: {ctx.translation_path}")
+
+    def _translate_single(self, ctx: PipelineContext):
+        """单人模式：全文翻译"""
+        text = ctx.transcript.to_plain_text()
+        chunks = self._split_to_chunks(text, self.chunk_size)
+        print(f"  📝 单人模式：{len(text)} 字，分为 {len(chunks)} 段翻译")
+        ctx.translation = self.llm.translate_chunks(chunks, self.system_prompt)
+
+    def _translate_multi_speaker(self, ctx: PipelineContext):
+        """多说话人模式：按说话人分段，批量翻译，保留标签"""
+        # 将连续同一说话人的片段合并
+        merged = self._merge_speaker_segments(ctx.transcript.segments)
+        print(f"  📝 多说话人模式：{len(merged)} 段对话")
+
+        # 构造带说话人标签的翻译输入
+        # 批量翻译（按 chunk_size 分批）
+        ctx.speaker_translations = []
+        batch_text = ""
+        batch_items = []
+
+        for item in merged:
+            line = f"[{item['speaker']}]: {item['text']}"
+            if len(batch_text) + len(line) > self.chunk_size and batch_items:
+                # 翻译这一批
+                translated = self._translate_speaker_batch(batch_text, batch_items)
+                ctx.speaker_translations.extend(translated)
+                batch_text = ""
+                batch_items = []
+
+            batch_text += line + "\n\n"
+            batch_items.append(item)
+
+        # 最后一批
+        if batch_items:
+            translated = self._translate_speaker_batch(batch_text, batch_items)
+            ctx.speaker_translations.extend(translated)
+
+        # 也生成完整翻译文本
+        full_translated = "\n\n".join(
+            f"[{t['speaker']}] {t['translated']}" for t in ctx.speaker_translations
+        )
+        ctx.translation = TranslationResult(
+            source_text="\n\n".join(m["text"] for m in merged),
+            translated_text=full_translated,
+        )
+
+        print(f"  ✅ 多说话人翻译完成，共 {len(ctx.speaker_translations)} 段")
+
+    def _translate_speaker_batch(self, batch_text: str, batch_items: list) -> list:
+        """翻译一批带说话人标签的文本"""
+        prompt = self.system_prompt + (
+            "\n\n注意：文本中包含说话人标签如 [SPEAKER_00]:，"
+            "请保留标签格式，只翻译冒号后面的内容。"
+        )
+        result = self.llm.translate(batch_text, prompt)
+        translated_text = result.translated_text
+
+        # 尝试按说话人标签解析翻译结果
+        import re
+        parsed = re.findall(
+            r'\[(\w+)\][:\s]*(.*?)(?=\n*\[|\Z)',
+            translated_text,
+            re.DOTALL,
+        )
+
+        if len(parsed) == len(batch_items):
+            # 解析成功，标签对齐
+            return [
+                {
+                    "speaker": item["speaker"],
+                    "original": item["text"],
+                    "translated": p[1].strip(),
+                    "start": item["start"],
+                    "end": item["end"],
+                }
+                for item, p in zip(batch_items, parsed)
+            ]
+        else:
+            # 解析失败，按原始段落数均分
+            lines = [l.strip() for l in translated_text.split("\n\n") if l.strip()]
+            results = []
+            for i, item in enumerate(batch_items):
+                trans = lines[i] if i < len(lines) else ""
+                # 去掉可能残留的标签
+                trans = re.sub(r'^\[\w+\][:\s]*', '', trans)
+                results.append({
+                    "speaker": item["speaker"],
+                    "original": item["text"],
+                    "translated": trans,
+                    "start": item["start"],
+                    "end": item["end"],
+                })
+            return results
+
+    @staticmethod
+    def _merge_speaker_segments(segments) -> list[dict]:
+        """将连续同一说话人的片段合并"""
+        if not segments:
+            return []
+
+        merged = []
+        current = {
+            "speaker": segments[0].speaker or "SPEAKER_00",
+            "text": segments[0].text,
+            "start": segments[0].start,
+            "end": segments[0].end,
+        }
+
+        for seg in segments[1:]:
+            spk = seg.speaker or "SPEAKER_00"
+            if spk == current["speaker"]:
+                current["text"] += " " + seg.text
+                current["end"] = seg.end
+            else:
+                merged.append(current)
+                current = {
+                    "speaker": spk,
+                    "text": seg.text,
+                    "start": seg.start,
+                    "end": seg.end,
+                }
+
+        merged.append(current)
+        return merged
 
     def _synthesize(self, ctx: PipelineContext, skip: set):
         if not ctx.translation:
@@ -277,8 +448,22 @@ class Pipeline:
         safe_name = re.sub(r'[^\w\-]', '_', safe_name)
         output_path = os.path.join(self.final_dir, f"{safe_name}_zh.mp3")
 
-        # 使用长文本合成
+        has_multi_voice = (
+            ctx.speaker_translations
+            and len(ctx.voiceprint_oss_urls) > 1
+        )
+
+        if has_multi_voice:
+            self._synthesize_multi_speaker(ctx, output_path)
+        else:
+            self._synthesize_single(ctx, output_path)
+
+        ctx.final_audio_path = output_path
+
+    def _synthesize_single(self, ctx: PipelineContext, output_path: str):
+        """单音色合成"""
         voice_url = ctx.voiceprint_oss_url or None
+        print(f"  🔊 单音色合成模式")
 
         if hasattr(self.tts, "synthesize_long"):
             ctx.tts_result = self.tts.synthesize_long(
@@ -293,7 +478,79 @@ class Pipeline:
                 voice_url=voice_url,
             )
 
-        ctx.final_audio_path = output_path
+    def _synthesize_multi_speaker(self, ctx: PipelineContext, output_path: str):
+        """
+        多音色合成：按说话人分段合成，每段用对应的声纹，最后拼接。
+        """
+        from pydub import AudioSegment as PydubSegment
+        import tempfile
+
+        print(f"  🔊 多音色合成模式: {len(ctx.voiceprint_oss_urls)} 个声纹")
+        for spk, url in ctx.voiceprint_oss_urls.items():
+            role = "主持人" if any(
+                vp.speaker == spk and vp.is_host for vp in ctx.voiceprints
+            ) else "嘉宾"
+            print(f"     {spk} [{role}]: {url[:60]}...")
+
+        # 预创建所有说话人的音色（避免重复创建）
+        if hasattr(self.tts, 'preload_voices'):
+            unique_urls = list(set(ctx.voiceprint_oss_urls.values()))
+            self.tts.preload_voices(unique_urls)
+
+        combined = PydubSegment.empty()
+        temp_files = []
+        total = len(ctx.speaker_translations)
+
+        try:
+            for i, item in enumerate(ctx.speaker_translations, 1):
+                speaker = item["speaker"]
+                text = item["translated"]
+
+                if not text.strip():
+                    continue
+
+                # 选择声纹：优先用该说话人的，fallback 到主持人的
+                voice_url = ctx.voiceprint_oss_urls.get(
+                    speaker,
+                    ctx.voiceprint_oss_url,
+                )
+
+                role = "主持人" if any(
+                    vp.speaker == speaker and vp.is_host for vp in ctx.voiceprints
+                ) else "嘉宾"
+                print(f"     [{i:3d}/{total}] {speaker} [{role}] "
+                      f"({len(text)}字): {text[:30]}...")
+
+                temp_path = tempfile.mktemp(suffix=".mp3")
+                temp_files.append(temp_path)
+
+                # 合成单段
+                self.tts.synthesize(
+                    text=text,
+                    output_path=temp_path,
+                    voice_url=voice_url,
+                )
+
+                segment = PydubSegment.from_file(temp_path)
+                combined += segment
+
+                # 说话人切换时加短暂停顿（更自然）
+                if i < total:
+                    next_speaker = ctx.speaker_translations[i]["speaker"]
+                    if next_speaker != speaker:
+                        combined += PydubSegment.silent(duration=500)  # 0.5s 停顿
+
+            # 导出最终音频
+            combined.export(output_path, format="mp3")
+            duration = len(combined) / 1000
+
+            ctx.tts_result = TTSResult(audio_path=output_path, duration=duration)
+            print(f"  ✅ 多音色合成完成: {output_path} ({duration:.1f}s)")
+
+        finally:
+            for f in temp_files:
+                if os.path.exists(f):
+                    os.remove(f)
 
     @staticmethod
     def _split_to_chunks(text: str, max_size: int) -> list[str]:
@@ -313,3 +570,54 @@ class Pipeline:
             chunks.append(current.strip())
 
         return chunks if chunks else [text]
+
+    def _align_diarization_to_transcript(self, ctx: PipelineContext):
+        """
+        将说话人分离的时间戳与 STT 转写文本对齐。
+        
+        原理：根据时间重叠度，为每个转写片段分配最可能的说话人。
+        """
+        if not ctx.voiceprints or not ctx.transcript:
+            return
+
+        # 从 voiceprints 重建说话人时间段
+        speaker_segments = []
+        for vp in ctx.voiceprints:
+            speaker_segments.append({
+                'speaker': vp.speaker,
+                'start': vp.source_start,
+                'end': vp.source_end,
+            })
+        
+        if not speaker_segments:
+            return
+        
+        # 为每个转写片段分配说话人（基于时间重叠）
+        for seg in ctx.transcript.segments:
+            best_speaker = None
+            best_overlap = 0
+            
+            for spk_seg in speaker_segments:
+                # 计算时间重叠
+                overlap_start = max(seg.start, spk_seg['start'])
+                overlap_end = min(seg.end, spk_seg['end'])
+                overlap = max(0, overlap_end - overlap_start)
+                
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = spk_seg['speaker']
+            
+            # 如果有重叠，分配说话人；否则使用最近的说话人
+            if best_speaker and best_overlap > 0:
+                seg.speaker = best_speaker
+            else:
+                # fallback: 找时间最近的说话人
+                closest = min(
+                    speaker_segments,
+                    key=lambda s: abs(s['start'] - seg.start)
+                )
+                seg.speaker = closest['speaker']
+        
+        # 统计标注结果
+        labeled_count = sum(1 for seg in ctx.transcript.segments if seg.speaker)
+        print(f"  🏷️  已为 {labeled_count}/{len(ctx.transcript.segments)} 个片段标注说话人")

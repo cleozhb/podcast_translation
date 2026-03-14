@@ -57,15 +57,12 @@ class CosyVoiceTTS(TTSProvider):
         dashscope.api_key = cv.get("api_key", "")
         self.model = cv.get("model", "cosyvoice-v1")
         
-        # 声音克隆相关配置
-        self.voice_id = None  # 通过声音复刻创建的音色ID
-        self.voiceprint_url = None  # 声纹音频的公网 URL
+        # 音色缓存：{voiceprint_url: voice_id}
+        # 为每个不同的声纹 URL 缓存对应的音色 ID
+        self._voice_cache = {}
         
-        # 如果配置了声纹 URL，需要先创建音色
-        oss_config = config.get("oss", {})
-        if oss_config and self.voiceprint_url:
-            print("  ⚠️ 注意：声音克隆需要先创建音色，不能直接使用 OSS URL")
-            print("     请参考文档使用 VoiceEnrollmentService.create_voice() 创建音色")
+        # 声音克隆相关配置 - 移除了持久化的 voice_id 和 voiceprint_url
+        # 每次都为不同的声纹创建新音色（多说话人场景）
 
     def synthesize(self, text: str, output_path: str, voice_url: str = None) -> TTSResult:
         """
@@ -91,14 +88,19 @@ class CosyVoiceTTS(TTSProvider):
                 # 这是 OSS URL，尝试自动创建音色
                 print(f"     检测到 OSS URL，尝试自动创建音色...")
                 
-                # 检查是否已经有 voice_id
-                if not self.voice_id:
-                    # 自动创建音色
-                    self.voice_id = self._create_voice_from_url(voice_url)
+                # 检查缓存中是否已有该声纹的音色
+                if voice_url in self._voice_cache:
+                    voice_id = self._voice_cache[voice_url]
+                    print(f"     使用缓存音色ID: {voice_id}")
+                else:
+                    # 为该声纹创建新音色
+                    voice_id = self._create_voice_from_url(voice_url)
+                    if voice_id:
+                        self._voice_cache[voice_url] = voice_id
                 
-                if self.voice_id:
-                    print(f"     使用音色ID: {self.voice_id}")
-                    params["voice"] = self.voice_id
+                if voice_id:
+                    print(f"     使用音色ID: {voice_id}")
+                    params["voice"] = voice_id
                 else:
                     # 创建失败，降级到默认音色
                     print(f"  ⚠️ 音色创建失败，降级到默认音色 'longxiaochun'")
@@ -107,7 +109,6 @@ class CosyVoiceTTS(TTSProvider):
                 # 这可能是 voice_id
                 print(f"     使用音色ID: {voice_url[:60]}...")
                 params["voice"] = voice_url
-                self.voice_id = voice_url
             else:
                 # 其他情况，使用默认音色
                 print(f"     使用默认音色：longxiaochun")
@@ -233,6 +234,32 @@ class CosyVoiceTTS(TTSProvider):
         except Exception as e:
             print(f"  ❌ 创建音色失败：{e}")
             return None
+
+    def preload_voices(self, voiceprint_urls: list[str]) -> dict[str, str]:
+        """
+        预创建多个声纹的音色
+        
+        Args:
+            voiceprint_urls: 声纹 URL 列表
+            
+        Returns:
+            {voiceprint_url: voice_id} 映射字典
+        """
+        if not voiceprint_urls:
+            return {}
+        
+        print(f"\n  🎨 预创建 {len(voiceprint_urls)} 个音色...")
+        result = {}
+        
+        for i, url in enumerate(voiceprint_urls, 1):
+            print(f"\n  [{i}/{len(voiceprint_urls)}] ", end="")
+            voice_id = self._create_voice_from_url(url)
+            if voice_id:
+                result[url] = voice_id
+                self._voice_cache[url] = voice_id
+        
+        print(f"\n  ✅ 预创建完成，成功 {len(result)}/{len(voiceprint_urls)} 个音色")
+        return result
 
     def synthesize_long(
         self,
