@@ -253,6 +253,7 @@ def main():
     parser.add_argument("--title", type=str, default="episode", help="节目标题（配合 --url 使用）")
     parser.add_argument("--skip-tts", action="store_true", help="跳过 TTS 合成")
     parser.add_argument("--skip-voiceprint", action="store_true", help="跳过声纹提取")
+    parser.add_argument("--no-resume", action="store_true", help="忽略已有进度，从头开始")
     args = parser.parse_args()
 
     # 加载配置
@@ -291,14 +292,39 @@ def main():
     # 创建 Provider
     stt, llm, tts, storage = create_providers(config)
 
+    # 创建进度追踪器
+    from core.progress import ProgressTracker
+
+    db_path = config.get("output", {}).get("progress_db", "./data/progress.db")
+    progress = ProgressTracker(db_path=db_path)
+
+    episode_id = progress.get_or_create_episode(audio_url, podcast_name, episode_title)
+
+    if args.no_resume:
+        progress.reset_episode(episode_id)
+        print(f"  🔄 已清除进度记录，将从头开始")
+    else:
+        # 显示已有进度
+        completed = progress.get_completed_steps(episode_id)
+        if completed:
+            print(f"  📋 已完成步骤: {', '.join(completed.keys())}")
+            remaining = [
+                s for s in ProgressTracker.STEPS
+                if s not in completed and s not in skip_steps
+            ]
+            print(f"  ▶️  将执行步骤: {', '.join(remaining) if remaining else '全部已完成'}")
+
     # 创建并运行 Pipeline
-    pipeline = Pipeline(config, stt, llm, tts, storage)
+    pipeline = Pipeline(config, stt, llm, tts, storage, progress=progress)
     ctx = pipeline.run(
         audio_url=audio_url,
         podcast_name=podcast_name,
         episode_title=episode_title,
         skip_steps=skip_steps,
     )
+
+    if progress:
+        progress.close()
 
     # 输出最终结果路径
     print()

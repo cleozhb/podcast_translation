@@ -5,6 +5,7 @@ env/
 
 # Output directory
 output/
+data/
 
 # Python cache
 __pycache__/

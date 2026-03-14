@@ -4,6 +4,7 @@ core/pipeline.py
 工作流编排引擎：串联 STT → LLM → TTS 各步骤
 """
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -11,9 +12,10 @@ from typing import Optional
 
 from providers.base import (
     STTProvider, LLMProvider, TTSProvider, StorageProvider,
-    TranscriptResult, TranslationResult, TTSResult,
+    TranscriptResult, TranslationResult, TTSResult, TranscriptSegment,
 )
 from core.audio_utils import download_audio, extract_voiceprints_auto
+from core.progress import ProgressTracker
 
 
 @dataclass
@@ -70,12 +72,14 @@ class Pipeline:
         llm: LLMProvider,
         tts: TTSProvider,
         storage: Optional[StorageProvider] = None,
+        progress: Optional[ProgressTracker] = None,
     ):
         self.config = config
         self.stt = stt
         self.llm = llm
         self.tts = tts
         self.storage = storage
+        self.progress = progress
 
         # 输出目录
         out = config.get("output", {})
@@ -131,6 +135,18 @@ class Pipeline:
             start_time=time.time(),
         )
 
+        # 断点续跑：加载已完成步骤并恢复上下文
+        self._episode_id = None
+        self._completed_steps: dict[str, dict] = {}
+        if self.progress:
+            self._episode_id = self.progress.get_or_create_episode(
+                audio_url, podcast_name, episode_title
+            )
+            self._completed_steps = self.progress.get_completed_steps(self._episode_id)
+            if self._completed_steps:
+                self._restore_context(ctx, self._completed_steps)
+                print(f"  📋 已完成步骤: {', '.join(self._completed_steps.keys())}")
+
         print()
         print("=" * 65)
         print(f"  🚀 播客翻译工作流启动")
@@ -141,27 +157,36 @@ class Pipeline:
 
         try:
             # Step 1: 下载音频
-            self._step(ctx, "download", self._download, ctx, skip)
+            self._run_step(ctx, "download", self._download, skip)
 
             # Step 2: 提取声纹 & 上传 OSS
             if "voiceprint" not in skip:
-                self._step(ctx, "voiceprint", self._extract_voiceprint, ctx, skip)
+                self._run_step(ctx, "voiceprint", self._extract_voiceprint, skip)
+            elif self.progress and self._episode_id:
+                self.progress.mark_step_skipped(self._episode_id, "voiceprint")
 
             # Step 3: 语音转文字
-            self._step(ctx, "stt", self._transcribe, ctx, skip)
+            self._run_step(ctx, "stt", self._transcribe, skip)
 
             # Step 4: 翻译
-            self._step(ctx, "translate", self._translate, ctx, skip)
+            self._run_step(ctx, "translate", self._translate, skip)
 
             # Step 5: TTS 合成
             if "tts" not in skip:
-                self._step(ctx, "tts", self._synthesize, ctx, skip)
+                self._run_step(ctx, "tts", self._synthesize, skip)
+            elif self.progress and self._episode_id:
+                self.progress.mark_step_skipped(self._episode_id, "tts")
 
         except Exception as e:
             ctx.errors.append(f"Pipeline 异常: {e}")
             print(f"\n  ❌ 工作流异常: {e}")
             import traceback
             traceback.print_exc()
+            if self.progress and self._episode_id:
+                self.progress.mark_episode_failed(self._episode_id, str(e))
+        else:
+            if self.progress and self._episode_id:
+                self.progress.mark_episode_completed(self._episode_id)
 
         # 总结
         total = time.time() - ctx.start_time
@@ -180,19 +205,150 @@ class Pipeline:
 
         return ctx
 
-    def _step(self, ctx, name, func, *args, **kwargs):
-        """执行单步并记录耗时"""
+    def _run_step(self, ctx, name, func, skip):
+        """执行单步：已完成则跳过，否则执行并记录进度。"""
+        # 断点续跑：跳过已完成的步骤
+        if name in self._completed_steps:
+            print(f"\n{'─' * 50}")
+            print(f"  ⏭️  Step: {name} (已完成，跳过)")
+            print(f"{'─' * 50}")
+            return
+
         print(f"\n{'─' * 50}")
         print(f"  📌 Step: {name}")
         print(f"{'─' * 50}")
         t0 = time.time()
         try:
-            func(*args, **kwargs)
+            func(ctx, skip)
         except Exception as e:
             ctx.errors.append(f"[{name}] {e}")
+            if self.progress and self._episode_id:
+                self.progress.mark_step_failed(self._episode_id, name, str(e))
             raise
         finally:
             ctx.step_times[name] = time.time() - t0
+
+        # 成功：持久化该步骤结果
+        if self.progress and self._episode_id:
+            result_data = self._extract_step_result(ctx, name)
+            self.progress.mark_step_completed(self._episode_id, name, result_data)
+
+    # ============================================================
+    # 断点续跑：提取 / 恢复步骤结果
+    # ============================================================
+
+    @staticmethod
+    def _extract_step_result(ctx: 'PipelineContext', step_name: str) -> dict:
+        """从 PipelineContext 提取该步骤要持久化的数据。"""
+        if step_name == "download":
+            return {"local_audio_path": ctx.local_audio_path}
+        elif step_name == "voiceprint":
+            return {
+                "voiceprint_local_path": ctx.voiceprint_local_path,
+                "voiceprint_oss_url": ctx.voiceprint_oss_url,
+                "voiceprint_oss_urls": ctx.voiceprint_oss_urls,
+            }
+        elif step_name == "stt":
+            json_path = ctx.transcript_path.replace(".txt", ".json") if ctx.transcript_path else ""
+            return {
+                "transcript_path": ctx.transcript_path,
+                "transcript_json_path": json_path,
+            }
+        elif step_name == "translate":
+            return {
+                "translation_path": ctx.translation_path,
+                "speaker_translations": ctx.speaker_translations,
+            }
+        elif step_name == "tts":
+            return {"final_audio_path": ctx.final_audio_path}
+        return {}
+
+    def _restore_context(self, ctx: 'PipelineContext', completed_steps: dict) -> None:
+        """从已保存的步骤结果恢复 PipelineContext 字段。
+
+        如果某步依赖的文件已缺失，则该步及后续步骤视为未完成。
+        """
+        ordered = [s for s in ProgressTracker.STEPS if s in completed_steps]
+
+        for step in ordered:
+            data = completed_steps[step]
+
+            if step == "download":
+                path = data.get("local_audio_path", "")
+                if path and os.path.exists(path):
+                    ctx.local_audio_path = path
+                else:
+                    self._invalidate_from(step, completed_steps)
+                    return
+
+            elif step == "voiceprint":
+                ctx.voiceprint_local_path = data.get("voiceprint_local_path", "")
+                ctx.voiceprint_oss_url = data.get("voiceprint_oss_url", "")
+                ctx.voiceprint_oss_urls = data.get("voiceprint_oss_urls", {})
+
+            elif step == "stt":
+                json_path = data.get("transcript_json_path", "")
+                txt_path = data.get("transcript_path", "")
+                if json_path and os.path.exists(json_path):
+                    ctx.transcript = self._load_transcript_from_json(json_path)
+                    ctx.transcript_path = txt_path
+                elif txt_path and os.path.exists(txt_path):
+                    ctx.transcript = self._load_transcript_from_txt(txt_path)
+                    ctx.transcript_path = txt_path
+                else:
+                    self._invalidate_from(step, completed_steps)
+                    return
+
+            elif step == "translate":
+                ctx.speaker_translations = data.get("speaker_translations", [])
+                t_path = data.get("translation_path", "")
+                if t_path and os.path.exists(t_path):
+                    ctx.translation_path = t_path
+                    with open(t_path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                    ctx.translation = TranslationResult(translated_text=text)
+                else:
+                    self._invalidate_from(step, completed_steps)
+                    return
+
+            elif step == "tts":
+                ctx.final_audio_path = data.get("final_audio_path", "")
+
+    def _invalidate_from(self, step_name: str, completed_steps: dict) -> None:
+        """文件缺失时，将该步骤及后续步骤从已完成集合中移除。"""
+        found = False
+        for s in ProgressTracker.STEPS:
+            if s == step_name:
+                found = True
+            if found:
+                completed_steps.pop(s, None)
+        print(f"  ⚠️ 步骤 {step_name} 的输出文件缺失，将从此步骤开始重跑")
+
+    @staticmethod
+    def _load_transcript_from_json(json_path: str) -> TranscriptResult:
+        """从 JSON sidecar 恢复 TranscriptResult。"""
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        segments = [
+            TranscriptSegment(
+                start=s["start"], end=s["end"], text=s["text"],
+                speaker=s.get("speaker", ""),
+            )
+            for s in data.get("segments", [])
+        ]
+        return TranscriptResult(
+            segments=segments,
+            full_text=data.get("full_text", ""),
+            language=data.get("language", "en"),
+            duration=data.get("duration", 0.0),
+        )
+
+    @staticmethod
+    def _load_transcript_from_txt(txt_path: str) -> TranscriptResult:
+        """从纯文本文件回退恢复（无说话人信息）。"""
+        with open(txt_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        return TranscriptResult(full_text=text)
 
     # ============================================================
     # 各步骤实现
@@ -284,6 +440,20 @@ class Pipeline:
         ctx.transcript_path = os.path.join(self.transcript_dir, f"{safe_name}.txt")
         with open(ctx.transcript_path, "w", encoding="utf-8") as f:
             f.write(ctx.transcript.to_timestamped_text())
+
+        # 保存 JSON sidecar（供断点续跑恢复完整结构）
+        json_path = ctx.transcript_path.replace(".txt", ".json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "segments": [
+                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
+                    for s in ctx.transcript.segments
+                ],
+                "full_text": ctx.transcript.full_text,
+                "language": ctx.transcript.language,
+                "duration": ctx.transcript.duration,
+            }, f, ensure_ascii=False, indent=2)
+
         print(f"  💾 转写文本: {ctx.transcript_path}")
 
     def _translate(self, ctx: PipelineContext, skip: set):
