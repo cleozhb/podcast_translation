@@ -808,12 +808,21 @@ class Pipeline:
                 temp_path = tempfile.mktemp(suffix=".mp3")
                 temp_files.append(temp_path)
 
-                # 合成单段
-                self.tts.synthesize(
-                    text=text,
-                    output_path=temp_path,
-                    voice_url=voice_url,
-                )
+                # 合成单段（长文本自动分段，避免超出 API 限制导致音频异常）
+                from providers.cosyvoice_tts import CosyVoiceTTS
+                if isinstance(self.tts, CosyVoiceTTS) and len(text) > 300:
+                    self.tts.synthesize_long(
+                        text=text,
+                        output_path=temp_path,
+                        voice_url=voice_url,
+                        max_chars=300,
+                    )
+                else:
+                    self.tts.synthesize(
+                        text=text,
+                        output_path=temp_path,
+                        voice_url=voice_url,
+                    )
 
                 segment = PydubSegment.from_file(temp_path)
                 combined += segment

@@ -10,6 +10,9 @@ main.py
     python main.py --skip-tts         # 跳过 TTS（只做转写+翻译）
     python main.py --skip-voiceprint         # 跳过声纹提取（只做转写+翻译）
     python main.py --skip-voiceprint --skip-tts         # 跳过声纹提取（只做转写+翻译）
+    
+    # 用本地文件做测试
+    python main.py --local-file /home/zhanghuibin02/code/podcast_translation/output/audio/what_happens_after_coding_is_solved_clip_5min.mp3 --name "podcast" --title "what_happens_after_coding_is_solved_clip_5min" --no-resume
 """
 
 import os

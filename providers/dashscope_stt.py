@@ -6,6 +6,7 @@ providers/dashscope_stt.py
 """
 
 import json
+import re
 import dashscope
 from dashscope.audio.asr import Transcription
 from providers.base import STTProvider, TranscriptResult, TranscriptSegment
@@ -19,6 +20,17 @@ class DashScopeSTT(STTProvider):
         dc = config.get("dashscope", {})
         dashscope.api_key = dc.get("api_key", "")
         self.model = dc.get("stt_model", "paraformer-v2")
+
+    @staticmethod
+    def _clean_english_text(text: str) -> str:
+        """清理英文转写结果中混入的中文字符。
+        fun-asr 多语言模型有时会把英文数字/百分比识别为中文（如 'four percent' → '百 分 之 4'）。
+        """
+        # 移除英文文本中夹杂的中文字符（保留数字和标点）
+        cleaned = re.sub(r'[\u4e00-\u9fff]+', '', text)
+        # 压缩连续空格
+        cleaned = re.sub(r' {2,}', ' ', cleaned).strip()
+        return cleaned
 
     def transcribe(self, audio_path: str, language: str = "en") -> TranscriptResult:
         print(f"  🎤 [DashScope STT] 正在转写: {audio_path}")
@@ -55,10 +67,14 @@ class DashScopeSTT(STTProvider):
                 # 这里做通用解析
                 if "sentences" in t:
                     for sent in t["sentences"]:
+                        text = sent.get("text", "")
+                        # 英文转写时清理混入的中文字符
+                        if language == "en":
+                            text = self._clean_english_text(text)
                         seg = TranscriptSegment(
                             start=sent.get("begin_time", 0) / 1000,
                             end=sent.get("end_time", 0) / 1000,
-                            text=sent.get("text", ""),
+                            text=text,
                             speaker=sent.get("speaker", "SPEAKER_00"),  # 提取说话人标签
                         )
                         result.segments.append(seg)
@@ -115,10 +131,14 @@ class DashScopeSTT(STTProvider):
                 resp = requests.get(url)
                 data = resp.json()
                 for sent in data.get("transcripts", [{}])[0].get("sentences", []):
+                    text = sent.get("text", "")
+                    # 英文转写时清理混入的中文字符
+                    if language == "en":
+                        text = self._clean_english_text(text)
                     seg = TranscriptSegment(
                         start=sent.get("begin_time", 0) / 1000,
                         end=sent.get("end_time", 0) / 1000,
-                        text=sent.get("text", ""),
+                        text=text,
                         speaker=sent.get("speaker", "SPEAKER_00"),  # 提取说话人标签
                     )
                     result.segments.append(seg)
