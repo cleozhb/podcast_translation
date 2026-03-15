@@ -77,6 +77,12 @@ diarization:
   # energy:     简易能量检测 fallback，不区分说话人
   method: dashscope
 
+  # dashscope 说话人分离使用的模型（不设则复用 dashscope.stt_model，默认 paraformer-v2）
+  # 可选: paraformer-v2 | fun-asr
+  model: "fun-asr"
+  # 语言提示（默认 ["en"]）
+  language_hints: ["en"]
+
   # pyannote 专用配置
   pyannote:
     hf_token: "your-huggingface-token"   # https://huggingface.co/settings/tokens

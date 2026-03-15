@@ -209,16 +209,20 @@ def diarize_pyannote(audio_path: str, hf_token: str = None,
 # 说话人分离：DashScope（阿里云 API，无需本地 GPU）
 # ============================================================
 
-def diarize_dashscope(audio_url: str, api_key: str = None) -> DiarizationResult:
+def diarize_dashscope(audio_url: str, api_key: str = None,
+                      model: str = "paraformer-v2",
+                      language_hints: list[str] = None) -> DiarizationResult:
     """
     使用阿里云 DashScope 说话人分离。
 
     注意：需要音频的公网 URL（先上传到 OSS）。
-    DashScope Paraformer 支持在转写时同时输出说话人标签。
+    DashScope Paraformer / SenseVoice 支持在转写时同时输出说话人标签。
 
     Args:
         audio_url: 音频公网 URL
         api_key: DashScope API Key
+        model: 转写模型，如 "paraformer-v2" 或 "fun-asr"
+        language_hints: 语言提示列表，如 ["en"]、["zh"]
     """
     import dashscope
     from dashscope.audio.asr import Transcription
@@ -227,14 +231,18 @@ def diarize_dashscope(audio_url: str, api_key: str = None) -> DiarizationResult:
     if api_key:
         dashscope.api_key = api_key
 
+    if language_hints is None:
+        language_hints = ["en"]
+
     print(f"  🔬 [DashScope] 说话人分离中...")
+    print(f"     模型: {model}")
     print(f"     URL: {audio_url[:80]}...")
 
-    # 使用 Paraformer 的说话人分离功能
+    # 使用 Paraformer / SenseVoice 的说话人分离功能
     response = Transcription.async_call(
-        model="paraformer-v2",
+        model=model,
         file_urls=[audio_url],
-        language_hints=["en"],
+        language_hints=language_hints,
         diarization_enabled=True,
     )
 
@@ -481,6 +489,8 @@ def extract_voiceprints_auto(
     # dashscope 参数
     audio_url: str = None,
     dashscope_api_key: str = None,
+    dashscope_model: str = "paraformer-v2",
+    language_hints: list[str] = None,
 ) -> list[VoiceprintInfo]:
     """
     一键接口：自动完成说话人分离 + 声纹提取。
@@ -494,6 +504,8 @@ def extract_voiceprints_auto(
         num_speakers: 已知说话人数（None 自动检测）
         audio_url: dashscope 所需的公网 URL
         dashscope_api_key: DashScope API Key
+        dashscope_model: dashscope 转写模型，如 "paraformer-v2" 或 "fun-asr"
+        language_hints: 语言提示列表，如 ["en"]、["zh"]
 
     Returns:
         每个说话人的 VoiceprintInfo 列表
@@ -517,7 +529,10 @@ def extract_voiceprints_auto(
     elif method == "dashscope":
         if not audio_url:
             raise ValueError("dashscope 方法需要 audio_url 参数（公网 URL）")
-        diarization = diarize_dashscope(audio_url, api_key=dashscope_api_key)
+        diarization = diarize_dashscope(
+            audio_url, api_key=dashscope_api_key,
+            model=dashscope_model, language_hints=language_hints,
+        )
     elif method == "energy":
         diarization = diarize_energy(wav_path)
     else:

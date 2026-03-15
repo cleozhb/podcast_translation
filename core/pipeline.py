@@ -105,6 +105,11 @@ class Pipeline:
         vp_config = dc.get("voiceprint", {})
         self.voiceprint_duration = vp_config.get("target_duration", 20)
 
+        # dashscope 说话人分离的模型配置（复用 dashscope.stt_model，可单独覆盖）
+        dashscope_cfg = config.get("dashscope", {})
+        self.diarization_model = dc.get("model", dashscope_cfg.get("stt_model", "paraformer-v2"))
+        self.diarization_language_hints = dc.get("language_hints", ["en"])
+
         # 代理
         self.proxy = config.get("rss", {}).get("proxy")
 
@@ -383,6 +388,8 @@ class Pipeline:
             num_speakers=self.pyannote_config.get("num_speakers"),
             audio_url=audio_url,
             dashscope_api_key=dashscope_key,
+            dashscope_model=self.diarization_model,
+            language_hints=self.diarization_language_hints,
         )
 
         if not voiceprints:
