@@ -371,10 +371,21 @@ class Pipeline:
             proxy=self.proxy,
         )
 
-    def _get_audio_url(self, ctx: PipelineContext) -> str:
-        """获取音频的公网 URL，优先复用原始 URL，需要上传时只上传一次。"""
+    def _get_audio_url(self, ctx: PipelineContext, force_oss: bool = False) -> str:
+        """获取音频的公网 URL，优先复用原始 URL，需要上传时只上传一次。
+        
+        Args:
+            ctx: 上下文
+            force_oss: 是否强制上传到 OSS（用于 DashScope 等无法直接访问外部 URL 的场景）
+        """
         # 已经上传过 OSS，直接复用
         if ctx.oss_audio_url:
+            return ctx.oss_audio_url
+
+        # 强制上传到 OSS（用于 DashScope 等服务）
+        if force_oss and self.storage and ctx.local_audio_path:
+            print(f"  📤 上传音频到 OSS（DashScope 需要）...")
+            ctx.oss_audio_url = self.storage.upload(ctx.local_audio_path)
             return ctx.oss_audio_url
 
         # 原始 URL 本身就是公网可访问的，直接用
@@ -398,7 +409,7 @@ class Pipeline:
         audio_url = None
         dashscope_key = None
         if self.diarization_method == "dashscope":
-            audio_url = self._get_audio_url(ctx)
+            audio_url = self._get_audio_url(ctx, force_oss=True)
             dashscope_key = self.config.get("dashscope", {}).get("api_key")
 
         # 一键：说话人分离 + 声纹提取
