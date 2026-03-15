@@ -119,10 +119,11 @@ class Pipeline:
 
     def run(
         self,
-        audio_url: str,
+        audio_url: str = "",
         podcast_name: str = "unknown",
         episode_title: str = "",
         skip_steps: list[str] = None,
+        local_audio_path: str = "",
     ) -> PipelineContext:
         """
         执行完整工作流。
@@ -132,6 +133,7 @@ class Pipeline:
             podcast_name: 播客名称
             episode_title: 节目标题
             skip_steps: 跳过的步骤列表，如 ["voiceprint", "tts"]
+            local_audio_path: 本地音频文件路径，如果指定则跳过下载步骤
 
         Returns:
             PipelineContext 包含所有中间结果
@@ -143,6 +145,8 @@ class Pipeline:
             audio_url=audio_url,
             start_time=time.time(),
         )
+        if local_audio_path:
+            ctx.local_audio_path = local_audio_path
 
         # 断点续跑：加载已完成步骤并恢复上下文
         self._episode_id = None
@@ -364,6 +368,9 @@ class Pipeline:
     # ============================================================
 
     def _download(self, ctx: PipelineContext, skip: set):
+        if ctx.local_audio_path:
+            print(f"  ... 使用本地文件: {ctx.local_audio_path}")
+            return
         ctx.local_audio_path = download_audio(
             url=ctx.audio_url,
             output_dir=self.audio_dir,
@@ -388,8 +395,8 @@ class Pipeline:
             ctx.oss_audio_url = self.storage.upload(ctx.local_audio_path)
             return ctx.oss_audio_url
 
-        # 原始 URL 本身就是公网可访问的，直接用
-        if ctx.audio_url:
+        # 原始 URL 本身就是公网可访问的，直接用（排除本地文件伪 URL）
+        if ctx.audio_url and ctx.audio_url.startswith(("http://", "https://")):
             print(f"  🔗 复用原始音频 URL（无需上传 OSS）")
             ctx.oss_audio_url = ctx.audio_url
             return ctx.oss_audio_url

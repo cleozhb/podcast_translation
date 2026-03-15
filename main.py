@@ -249,6 +249,7 @@ def main():
     parser = argparse.ArgumentParser(description="播客翻译工作流")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--url", type=str, help="直接指定音频 URL（跳过交互选择）")
+    parser.add_argument("--local-file", type=str, help="直接指定本地音频文件路径（跳过下载）")
     parser.add_argument("--name", type=str, default="podcast", help="播客名称（配合 --url 使用）")
     parser.add_argument("--title", type=str, default="episode", help="节目标题（配合 --url 使用）")
     parser.add_argument("--skip-tts", action="store_true", help="跳过 TTS 合成")
@@ -266,7 +267,18 @@ def main():
     print("╚══════════════════════════════════════════════╝")
 
     # 选择节目
-    if args.url:
+    local_audio_path = ""
+    if args.local_file:
+        import os
+        if not os.path.isfile(args.local_file):
+            print(f"  ❌ 本地文件不存在: {args.local_file}")
+            return
+        local_audio_path = os.path.abspath(args.local_file)
+        podcast_name = args.name
+        episode_title = args.title
+        audio_url = f"local://{local_audio_path}"
+        print(f"  📂 使用本地文件: {local_audio_path}")
+    elif args.url:
         podcast_name = args.name
         episode_title = args.title
         audio_url = args.url
@@ -321,6 +333,7 @@ def main():
         podcast_name=podcast_name,
         episode_title=episode_title,
         skip_steps=skip_steps,
+        local_audio_path=local_audio_path,
     )
 
     if progress:
