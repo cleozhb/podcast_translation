@@ -14,7 +14,7 @@ from providers.base import (
     STTProvider, LLMProvider, TTSProvider, StorageProvider,
     TranscriptResult, TranslationResult, TTSResult, TranscriptSegment,
 )
-from core.audio_utils import download_audio, extract_voiceprints_auto
+from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult
 from core.progress import ProgressTracker
 
 
@@ -35,6 +35,7 @@ class PipelineContext:
 
     # Step 2: 声纹
     voiceprints: list = field(default_factory=list)          # list[VoiceprintInfo]
+    diarization_result: Optional[DiarizationResult] = None   # 完整说话人时间线
     voiceprint_local_path: str = ""                          # 主持人声纹（兼容单人模式）
     voiceprint_oss_url: str = ""
     voiceprint_oss_urls: dict = field(default_factory=dict)  # {speaker_id: oss_url}
@@ -401,7 +402,7 @@ class Pipeline:
             dashscope_key = self.config.get("dashscope", {}).get("api_key")
 
         # 一键：说话人分离 + 声纹提取
-        voiceprints = extract_voiceprints_auto(
+        voiceprints, diarization_result = extract_voiceprints_auto(
             audio_path=ctx.local_audio_path,
             output_dir=self.voiceprint_dir,
             method=self.diarization_method,
@@ -419,6 +420,7 @@ class Pipeline:
             return
 
         ctx.voiceprints = voiceprints
+        ctx.diarization_result = diarization_result
 
         # 上传所有说话人的声纹到 OSS
         if self.storage:
@@ -456,8 +458,10 @@ class Pipeline:
         else:
             ctx.transcript = self.stt.transcribe(ctx.local_audio_path)
 
-        # 如果已有说话人分离结果，将时间戳对齐到转写文本
-        if ctx.voiceprints and self.diarization_method != "energy":
+        # 如果 STT 已返回说话人标签（如 DashScope），直接使用；否则用分离结果对齐
+        if self._stt_provides_speaker_labels(ctx):
+            print("  🏷️  STT 已提供说话人标签，跳过后处理对齐")
+        elif ctx.voiceprints and self.diarization_method != "energy":
             self._align_diarization_to_transcript(ctx)
 
         # 保存转写文本
@@ -561,50 +565,113 @@ class Pipeline:
         print(f"  ✅ 多说话人翻译完成，共 {len(ctx.speaker_translations)} 段")
 
     def _translate_speaker_batch(self, batch_text: str, batch_items: list) -> list:
-        """翻译一批带说话人标签的文本"""
-        prompt = self.system_prompt + (
+        """翻译一批带说话人标签的文本，支持重试和逐段 fallback"""
+        import re
+        max_retries = 1
+
+        for attempt in range(max_retries + 1):
+            is_retry = attempt > 0
+            prompt = self._build_speaker_translation_prompt(
+                is_retry=is_retry, expected_count=len(batch_items),
+            )
+            result = self.llm.translate(batch_text, prompt)
+            translated_text = result.translated_text
+
+            parsed = self._parse_speaker_translation(translated_text, len(batch_items))
+            if parsed is not None:
+                return [
+                    {
+                        "speaker": item["speaker"],
+                        "original": item["text"],
+                        "translated": p[1].strip(),
+                        "start": item["start"],
+                        "end": item["end"],
+                    }
+                    for item, p in zip(batch_items, parsed)
+                ]
+
+            if attempt < max_retries:
+                print(f"  ⚠️ 翻译解析失败（尝试 {attempt + 1}/{max_retries + 1}），重试...")
+
+        # 重试耗尽，逐段翻译兜底
+        print(f"  ⚠️ 批量翻译解析失败，回退到逐段翻译（{len(batch_items)} 段）")
+        return self._translate_segment_by_segment(batch_items)
+
+    def _build_speaker_translation_prompt(self, is_retry: bool = False, expected_count: int = 0) -> str:
+        """构造带说话人标签的翻译 prompt"""
+        base = self.system_prompt + (
             "\n\n注意：文本中包含说话人标签如 [SPEAKER_00]:，"
             "请保留标签格式，只翻译冒号后面的内容。"
         )
-        result = self.llm.translate(batch_text, prompt)
-        translated_text = result.translated_text
+        if is_retry:
+            base += (
+                f"\n\n【重要】请严格遵守以下格式要求："
+                f"\n1. 输入共 {expected_count} 段，输出也必须恰好 {expected_count} 段"
+                f"\n2. 每段必须以 [SPEAKER_XX]: 开头（保留原始标签）"
+                f"\n3. 每段之间用空行分隔"
+                f"\n4. 不要合并或拆分段落"
+            )
+        return base
 
-        # 尝试按说话人标签解析翻译结果
+    @staticmethod
+    def _parse_speaker_translation(translated_text: str, expected_count: int):
+        """
+        解析带说话人标签的翻译结果。
+
+        Returns:
+            成功返回 list[(speaker, text)]，失败返回 None
+        """
         import re
+
+        # 主正则
         parsed = re.findall(
             r'\[(\w+)\][:\s]*(.*?)(?=\n*\[|\Z)',
             translated_text,
             re.DOTALL,
         )
+        if len(parsed) == expected_count:
+            return parsed
 
-        if len(parsed) == len(batch_items):
-            # 解析成功，标签对齐
-            return [
-                {
-                    "speaker": item["speaker"],
-                    "original": item["text"],
-                    "translated": p[1].strip(),
-                    "start": item["start"],
-                    "end": item["end"],
-                }
-                for item, p in zip(batch_items, parsed)
-            ]
-        else:
-            # 解析失败，按原始段落数均分
-            lines = [l.strip() for l in translated_text.split("\n\n") if l.strip()]
+        # 兼容全角括号和全角冒号
+        parsed = re.findall(
+            r'[\[【](\w+)[\]】][:\s：]*(.*?)(?=\n*[\[【]|\Z)',
+            translated_text,
+            re.DOTALL,
+        )
+        if len(parsed) == expected_count:
+            return parsed
+
+        # 按空行分割兜底
+        lines = [l.strip() for l in translated_text.split("\n\n") if l.strip()]
+        if len(lines) == expected_count:
             results = []
-            for i, item in enumerate(batch_items):
-                trans = lines[i] if i < len(lines) else ""
-                # 去掉可能残留的标签
-                trans = re.sub(r'^\[\w+\][:\s]*', '', trans)
-                results.append({
-                    "speaker": item["speaker"],
-                    "original": item["text"],
-                    "translated": trans,
-                    "start": item["start"],
-                    "end": item["end"],
-                })
+            for line in lines:
+                m = re.match(r'[\[【]?(\w+)[\]】]?[:\s：]*(.*)', line, re.DOTALL)
+                if m:
+                    results.append((m.group(1), m.group(2).strip()))
+                else:
+                    results.append(("", line))
             return results
+
+        return None
+
+    def _translate_segment_by_segment(self, batch_items: list) -> list:
+        """逐段翻译 fallback：每段独立翻译，不依赖格式解析"""
+        import re
+        results = []
+        for i, item in enumerate(batch_items):
+            print(f"    逐段翻译 {i + 1}/{len(batch_items)}...")
+            result = self.llm.translate(item["text"], self.system_prompt)
+            translated = result.translated_text.strip()
+            translated = re.sub(r'^[\[【]?\w+[\]】]?[:\s：]*', '', translated)
+            results.append({
+                "speaker": item["speaker"],
+                "original": item["text"],
+                "translated": translated,
+                "start": item["start"],
+                "end": item["end"],
+            })
+        return results
 
     @staticmethod
     def _merge_speaker_segments(segments) -> list[dict]:
@@ -770,43 +837,59 @@ class Pipeline:
 
         return chunks if chunks else [text]
 
+    @staticmethod
+    def _stt_provides_speaker_labels(ctx: 'PipelineContext') -> bool:
+        """检查 STT 结果是否已包含有效的说话人标签（如 DashScope 自带说话人分离）。"""
+        if not ctx.transcript or not ctx.transcript.segments:
+            return False
+        speakers = set(seg.speaker for seg in ctx.transcript.segments if seg.speaker)
+        labeled = sum(1 for seg in ctx.transcript.segments if seg.speaker)
+        ratio = labeled / len(ctx.transcript.segments)
+        return len(speakers) >= 2 and ratio > 0.8
+
     def _align_diarization_to_transcript(self, ctx: PipelineContext):
         """
         将说话人分离的时间戳与 STT 转写文本对齐。
-        
-        原理：根据时间重叠度，为每个转写片段分配最可能的说话人。
+
+        优先使用完整的 DiarizationResult 时间线（覆盖全部音频），
+        若不可用（如断点续跑），fallback 到 voiceprint 的 source_start/end。
         """
-        if not ctx.voiceprints or not ctx.transcript:
+        if not ctx.transcript:
             return
 
-        # 从 voiceprints 重建说话人时间段
-        speaker_segments = []
-        for vp in ctx.voiceprints:
-            speaker_segments.append({
-                'speaker': vp.speaker,
-                'start': vp.source_start,
-                'end': vp.source_end,
-            })
-        
+        # 优先用完整说话人时间线，fallback 到 voiceprint 的片段
+        if ctx.diarization_result and ctx.diarization_result.segments:
+            speaker_segments = [
+                {'speaker': s.speaker, 'start': s.start, 'end': s.end}
+                for s in ctx.diarization_result.segments
+            ]
+            print(f"  🏷️  使用完整说话人时间线对齐（{len(speaker_segments)} 个片段）")
+        elif ctx.voiceprints:
+            speaker_segments = [
+                {'speaker': vp.speaker, 'start': vp.source_start, 'end': vp.source_end}
+                for vp in ctx.voiceprints
+            ]
+            print(f"  🏷️  使用声纹片段对齐（fallback，仅 {len(speaker_segments)} 个片段）")
+        else:
+            return
+
         if not speaker_segments:
             return
-        
+
         # 为每个转写片段分配说话人（基于时间重叠）
         for seg in ctx.transcript.segments:
             best_speaker = None
             best_overlap = 0
-            
+
             for spk_seg in speaker_segments:
-                # 计算时间重叠
                 overlap_start = max(seg.start, spk_seg['start'])
                 overlap_end = min(seg.end, spk_seg['end'])
                 overlap = max(0, overlap_end - overlap_start)
-                
+
                 if overlap > best_overlap:
                     best_overlap = overlap
                     best_speaker = spk_seg['speaker']
-            
-            # 如果有重叠，分配说话人；否则使用最近的说话人
+
             if best_speaker and best_overlap > 0:
                 seg.speaker = best_speaker
             else:
@@ -816,7 +899,7 @@ class Pipeline:
                     key=lambda s: abs(s['start'] - seg.start)
                 )
                 seg.speaker = closest['speaker']
-        
+
         # 统计标注结果
         labeled_count = sum(1 for seg in ctx.transcript.segments if seg.speaker)
         print(f"  🏷️  已为 {labeled_count}/{len(ctx.transcript.segments)} 个片段标注说话人")

@@ -491,9 +491,12 @@ def extract_voiceprints_auto(
     dashscope_api_key: str = None,
     dashscope_model: str = "paraformer-v2",
     language_hints: list[str] = None,
-) -> list[VoiceprintInfo]:
+) -> tuple[list[VoiceprintInfo], DiarizationResult]:
     """
     一键接口：自动完成说话人分离 + 声纹提取。
+
+    Returns:
+        (voiceprints, diarization_result) 元组：声纹列表 + 完整说话人时间线
 
     Args:
         audio_path: 本地音频路径
@@ -553,4 +556,4 @@ def extract_voiceprints_auto(
         role = "主持人" if vp.is_host else "嘉宾"
         print(f"     {vp.speaker} [{role}]: {vp.duration:.1f}s -> {vp.audio_path}")
 
-    return voiceprints
+    return voiceprints, diarization
