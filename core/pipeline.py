@@ -30,6 +30,9 @@ class PipelineContext:
     # Step 1: 下载
     local_audio_path: str = ""
 
+    # Step 1.5: 音频公网 URL（原始 URL 或上传 OSS 后的 URL，避免重复上传）
+    oss_audio_url: str = ""
+
     # Step 2: 声纹
     voiceprints: list = field(default_factory=list)          # list[VoiceprintInfo]
     voiceprint_local_path: str = ""                          # 主持人声纹（兼容单人模式）
@@ -367,15 +370,34 @@ class Pipeline:
             proxy=self.proxy,
         )
 
+    def _get_audio_url(self, ctx: PipelineContext) -> str:
+        """获取音频的公网 URL，优先复用原始 URL，需要上传时只上传一次。"""
+        # 已经上传过 OSS，直接复用
+        if ctx.oss_audio_url:
+            return ctx.oss_audio_url
+
+        # 原始 URL 本身就是公网可访问的，直接用
+        if ctx.audio_url:
+            print(f"  🔗 复用原始音频 URL（无需上传 OSS）")
+            ctx.oss_audio_url = ctx.audio_url
+            return ctx.oss_audio_url
+
+        # fallback: 上传本地文件到 OSS
+        if self.storage and ctx.local_audio_path:
+            ctx.oss_audio_url = self.storage.upload(ctx.local_audio_path)
+            return ctx.oss_audio_url
+
+        raise ValueError("无法获取音频公网 URL：无原始 URL 且未配置 OSS")
+
     def _extract_voiceprint(self, ctx: PipelineContext, skip: set):
         if not ctx.local_audio_path:
             raise ValueError("音频未下载")
 
-        # 如果用 dashscope 分离，需要先上传音频拿到公网 URL
+        # 如果用 dashscope 分离，需要公网可访问的音频 URL
         audio_url = None
         dashscope_key = None
-        if self.diarization_method == "dashscope" and self.storage:
-            audio_url = self.storage.upload(ctx.local_audio_path)
+        if self.diarization_method == "dashscope":
+            audio_url = self._get_audio_url(ctx)
             dashscope_key = self.config.get("dashscope", {}).get("api_key")
 
         # 一键：说话人分离 + 声纹提取
@@ -424,12 +446,12 @@ class Pipeline:
         if not ctx.local_audio_path:
             raise ValueError("音频未下载")
 
-        # 如果有 OSS，上传音频后用 URL 转写（支持大文件）
-        if self.storage and hasattr(self.stt, "transcribe_with_oss"):
-            audio_url = self.storage.upload(ctx.local_audio_path)
+        # 优先用公网 URL 转写（支持大文件），复用已有 URL 避免重复上传
+        if hasattr(self.stt, "transcribe_with_oss"):
+            audio_url = self._get_audio_url(ctx)
             ctx.transcript = self.stt.transcribe_with_oss(audio_url)
-        elif self.storage and hasattr(self.stt, "transcribe_with_url"):
-            audio_url = self.storage.upload(ctx.local_audio_path)
+        elif hasattr(self.stt, "transcribe_with_url"):
+            audio_url = self._get_audio_url(ctx)
             ctx.transcript = self.stt.transcribe_with_url(audio_url)
         else:
             ctx.transcript = self.stt.transcribe(ctx.local_audio_path)
