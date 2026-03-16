@@ -14,7 +14,7 @@ from providers.base import (
     STTProvider, LLMProvider, TTSProvider, StorageProvider,
     TranscriptResult, TranslationResult, TTSResult, TranscriptSegment,
 )
-from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult
+from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult, VoiceprintInfo, SpeakerSegment
 from core.progress import ProgressTracker
 
 
@@ -256,10 +256,35 @@ class Pipeline:
         if step_name == "download":
             return {"local_audio_path": ctx.local_audio_path}
         elif step_name == "voiceprint":
+            # 序列化 voiceprints
+            voiceprints_data = [
+                {
+                    "speaker": vp.speaker,
+                    "audio_path": vp.audio_path,
+                    "duration": vp.duration,
+                    "source_start": vp.source_start,
+                    "source_end": vp.source_end,
+                    "is_host": vp.is_host,
+                }
+                for vp in ctx.voiceprints
+            ]
+            # 序列化 diarization_result
+            diarization_data = None
+            if ctx.diarization_result:
+                diarization_data = {
+                    "num_speakers": ctx.diarization_result.num_speakers,
+                    "speaker_durations": ctx.diarization_result.speaker_durations,
+                    "segments": [
+                        {"speaker": s.speaker, "start": s.start, "end": s.end}
+                        for s in ctx.diarization_result.segments
+                    ],
+                }
             return {
                 "voiceprint_local_path": ctx.voiceprint_local_path,
                 "voiceprint_oss_url": ctx.voiceprint_oss_url,
                 "voiceprint_oss_urls": ctx.voiceprint_oss_urls,
+                "voiceprints": voiceprints_data,
+                "diarization_result": diarization_data,
             }
         elif step_name == "stt":
             json_path = ctx.transcript_path.replace(".txt", ".json") if ctx.transcript_path else ""
@@ -298,6 +323,29 @@ class Pipeline:
                 ctx.voiceprint_local_path = data.get("voiceprint_local_path", "")
                 ctx.voiceprint_oss_url = data.get("voiceprint_oss_url", "")
                 ctx.voiceprint_oss_urls = data.get("voiceprint_oss_urls", {})
+                # 恢复 voiceprints
+                for vp_data in data.get("voiceprints", []):
+                    ctx.voiceprints.append(VoiceprintInfo(
+                        speaker=vp_data["speaker"],
+                        audio_path=vp_data["audio_path"],
+                        duration=vp_data["duration"],
+                        source_start=vp_data["source_start"],
+                        source_end=vp_data["source_end"],
+                        is_host=vp_data.get("is_host", False),
+                    ))
+                # 恢复 diarization_result
+                dr_data = data.get("diarization_result")
+                if dr_data:
+                    ctx.diarization_result = DiarizationResult(
+                        num_speakers=dr_data["num_speakers"],
+                        speaker_durations=dr_data.get("speaker_durations", {}),
+                        segments=[
+                            SpeakerSegment(
+                                speaker=s["speaker"], start=s["start"], end=s["end"],
+                            )
+                            for s in dr_data.get("segments", [])
+                        ],
+                    )
 
             elif step == "stt":
                 json_path = data.get("transcript_json_path", "")
