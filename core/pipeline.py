@@ -515,14 +515,15 @@ class Pipeline:
             raise ValueError("音频未下载")
 
         # 优先用公网 URL 转写（支持大文件），复用已有 URL 避免重复上传
-        if hasattr(self.stt, "transcribe_with_oss"):
+        try:
             audio_url = self._get_audio_url(ctx)
             ctx.transcript = self.stt.transcribe_with_oss(audio_url)
-        elif hasattr(self.stt, "transcribe_with_url"):
-            audio_url = self._get_audio_url(ctx)
-            ctx.transcript = self.stt.transcribe_with_url(audio_url)
-        else:
-            ctx.transcript = self.stt.transcribe(ctx.local_audio_path)
+        except NotImplementedError:
+            try:
+                audio_url = self._get_audio_url(ctx)
+                ctx.transcript = self.stt.transcribe_with_url(audio_url)
+            except NotImplementedError:
+                ctx.transcript = self.stt.transcribe(ctx.local_audio_path)
 
         # 如果 STT 已返回说话人标签（如 DashScope），直接使用；否则用分离结果对齐
         if self._stt_provides_speaker_labels(ctx):
@@ -797,13 +798,13 @@ class Pipeline:
         voice_url = ctx.voiceprint_oss_url or None
         print(f"  🔊 单音色合成模式")
 
-        if hasattr(self.tts, "synthesize_long"):
+        try:
             ctx.tts_result = self.tts.synthesize_long(
                 text=ctx.translation.translated_text,
                 output_path=output_path,
                 voice_url=voice_url,
             )
-        else:
+        except NotImplementedError:
             ctx.tts_result = self.tts.synthesize(
                 text=ctx.translation.translated_text,
                 output_path=output_path,
@@ -825,9 +826,11 @@ class Pipeline:
             print(f"     {spk} [{role}]: {url[:60]}...")
 
         # 预创建所有说话人的音色（避免重复创建）
-        if hasattr(self.tts, 'preload_voices'):
+        try:
             unique_urls = list(set(ctx.voiceprint_oss_urls.values()))
             self.tts.preload_voices(unique_urls)
+        except NotImplementedError:
+            pass
 
         combined = PydubSegment.empty()
         temp_files = []

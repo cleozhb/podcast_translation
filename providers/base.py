@@ -93,6 +93,14 @@ class STTProvider(ABC):
         """
         ...
 
+    def transcribe_with_url(self, audio_url: str, language: str = "en") -> TranscriptResult:
+        """通过公网 URL 转写音频。子类可覆盖以支持远程转写。"""
+        raise NotImplementedError
+
+    def transcribe_with_oss(self, audio_url: str, language: str = "en") -> TranscriptResult:
+        """通过 OSS URL 转写音频。子类可覆盖以支持远程转写。"""
+        raise NotImplementedError
+
     def name(self) -> str:
         return self.__class__.__name__
 
@@ -162,6 +170,20 @@ class TTSProvider(ABC):
             TTSResult
         """
         ...
+
+    def synthesize_long(
+        self,
+        text: str,
+        output_path: str,
+        voice_url: Optional[str] = None,
+        max_chars: int = 300,
+    ) -> TTSResult:
+        """长文本分段合成。子类可覆盖以支持长文本。"""
+        raise NotImplementedError
+
+    def preload_voices(self, voiceprint_urls: list[str]) -> dict:
+        """预加载声纹音色。子类可覆盖以支持批量预加载。"""
+        raise NotImplementedError
 
     def name(self) -> str:
         return self.__class__.__name__
