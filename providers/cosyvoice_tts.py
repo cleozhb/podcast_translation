@@ -71,14 +71,56 @@ class CosyVoiceTTS(TTSProvider):
         # 声音克隆相关配置 - 移除了持久化的 voice_id 和 voiceprint_url
         # 每次都为不同的声纹创建新音色（多说话人场景）
 
+        # 合成质量验证配置
+        quality_cfg = cv.get("quality_verify", {})
+        self.verify_quality = quality_cfg.get("enabled", False)
+        self.similarity_threshold = quality_cfg.get("similarity_threshold", 0.35)
+        self.max_verify_retries = quality_cfg.get("max_retries", 3)
+
     def synthesize(self, text: str, output_path: str, voice_url: str = None) -> TTSResult:
         """
-        合成语音。
+        合成语音（带质量验证和自动重试）。
 
         Args:
             text: 要合成的中文文本
             output_path: 输出音频路径
             voice_url: 声纹参考音频的公网 URL(OSS 地址) 或 音色 ID(voice_id)
+        """
+        max_attempts = self.max_verify_retries if self.verify_quality else 1
+        last_error = None
+
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                print(f"     🔄 第 {attempt}/{max_attempts} 次重试合成...")
+
+            try:
+                result = self._synthesize_once(text, output_path, voice_url)
+            except Exception as e:
+                last_error = e
+                continue
+
+            # 质量验证
+            if self.verify_quality:
+                is_ok, score, detail = self._verify_quality(text, output_path)
+                if is_ok:
+                    if attempt > 1:
+                        print(f"     ✅ 重试成功 (score={score:.2f})")
+                    return result
+                else:
+                    print(f"     ⚠️ 质量不合格 (score={score:.2f}): {detail}")
+                    last_error = RuntimeError(f"质量验证失败: {detail}")
+                    continue
+            else:
+                return result
+
+        # 所有重试都失败
+        if last_error:
+            raise last_error
+        raise RuntimeError("TTS 合成失败：已达最大重试次数")
+
+    def _synthesize_once(self, text: str, output_path: str, voice_url: str = None) -> TTSResult:
+        """
+        单次合成语音（不含重试逻辑）。
         """
         print(f"  🔊 [CosyVoice TTS] 合成中...")
         print(f"     模型：{self.model}")
@@ -360,3 +402,252 @@ class CosyVoiceTTS(TTSProvider):
             chunks.append(current.strip())
 
         return chunks if chunks else [text]
+        
+    def _verify_quality(self, original_text: str, audio_path: str) -> tuple[bool, float, str]:
+        """
+        分层质量检测：
+        Layer 1: 本地音频特征检测（零成本）
+        Layer 2: 只有 Layer 1 可疑时才调 STT 做精确验证（低成本）
+
+        Returns:
+            (is_ok, score, detail_message)
+        """
+        # Layer 1: 本地音频特征检测
+        try:
+            is_normal, local_score, local_detail = self._check_audio_features(
+                original_text, audio_path
+            )
+            if is_normal:
+                return True, local_score, f"本地检测通过: {local_detail}"
+
+            print(f"     🔍 本地检测可疑 ({local_detail})，启动 STT 验证...")
+        except Exception as e:
+            print(f"     ⚠️ 本地检测异常，跳过: {e}")
+            # 本地检测失败不阻塞，直接放行
+            return True, -1.0, f"本地检测跳过: {e}"
+
+        # Layer 2: STT 反向验证（仅对可疑段）
+        try:
+            recognized = self._quick_stt(audio_path)
+            if not recognized:
+                return False, 0.0, "STT 未识别出任何文字"
+
+            score = self._text_similarity(original_text, recognized)
+
+            if score >= self.similarity_threshold:
+                return True, score, "STT 验证通过"
+            else:
+                orig_short = original_text[:30]
+                recog_short = recognized[:30]
+                return False, score, f"原: {orig_short}… → 识: {recog_short}…"
+
+        except Exception as e:
+            print(f"     ⚠️ STT 验证异常，跳过: {e}")
+            return True, -1.0, f"STT 跳过: {e}"
+
+    def _check_audio_features(
+        self, original_text: str, audio_path: str
+    ) -> tuple[bool, float, str]:
+        """
+        Layer 1: 纯本地音频特征检测，不调用任何 API。
+
+        检测维度:
+        1. 音节密度：正常中文约 3-5 音节/秒，对应特定的静音/发声切换频率
+        2. 能量稳定性：正常语音能量变化有规律，乱码能量分布异常
+        3. 有效语音占比：正常语音中发声段应占合理比例
+
+        Returns:
+            (is_normal, confidence_score, detail)
+        """
+        from pydub import AudioSegment, silence
+        import struct
+        import math
+        import re
+
+        audio = AudioSegment.from_file(audio_path)
+        duration_sec = len(audio) / 1000
+
+        if duration_sec < 0.5:
+            return False, 0.0, "音频过短"
+
+        # 转单声道 16bit 便于分析
+        audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
+        samples = struct.unpack(f"<{len(audio.raw_data) // 2}h", audio.raw_data)
+
+        issues = []
+        scores = []
+
+        # --- 检测 1: 静音/发声切换频率（音节节奏） ---
+        nonsilent = silence.detect_nonsilent(
+            audio, min_silence_len=80, silence_thresh=audio.dBFS - 16
+        )
+        if nonsilent:
+            switches_per_sec = len(nonsilent) / duration_sec
+            # 正常中文：每秒 2-8 次切换
+            if 1.5 <= switches_per_sec <= 12:
+                scores.append(1.0)
+            else:
+                scores.append(0.3)
+                issues.append(f"切换频率异常: {switches_per_sec:.1f}/s")
+        else:
+            scores.append(0.2)
+            issues.append("未检测到语音段")
+
+        # --- 检测 2: 能量变化规律性 ---
+        # 把音频分成 50ms 帧，计算每帧 RMS
+        frame_size = 800  # 50ms at 16kHz
+        frames = [
+            samples[i:i + frame_size]
+            for i in range(0, len(samples) - frame_size, frame_size)
+        ]
+        if len(frames) > 4:
+            rms_values = []
+            for frame in frames:
+                rms = math.sqrt(sum(s * s for s in frame) / len(frame)) if frame else 0
+                rms_values.append(rms)
+
+            mean_rms = sum(rms_values) / len(rms_values)
+            if mean_rms > 0:
+                variance = sum((r - mean_rms) ** 2 for r in rms_values) / len(rms_values)
+                cv = math.sqrt(variance) / mean_rms  # 变异系数
+
+                # 正常语音的变异系数通常在 0.5-2.0 之间
+                # 乱码往往过高（杂乱）或过低（单调嗡嗡声）
+                if 0.3 <= cv <= 2.5:
+                    scores.append(1.0)
+                else:
+                    scores.append(0.3)
+                    issues.append(f"能量变异系数异常: {cv:.2f}")
+            else:
+                scores.append(0.2)
+                issues.append("音频能量为零")
+        else:
+            scores.append(0.5)
+
+        # --- 检测 3: 过零率一致性 ---
+        # 正常语音的过零率在帧间有规律波动，乱码的帧间过零率方差更大
+        if len(frames) > 4:
+            zcr_values = []
+            for frame in frames:
+                crossings = sum(
+                    1 for i in range(1, len(frame))
+                    if (frame[i] >= 0) != (frame[i - 1] >= 0)
+                )
+                zcr_values.append(crossings / len(frame) if frame else 0)
+
+            mean_zcr = sum(zcr_values) / len(zcr_values)
+            if mean_zcr > 0:
+                zcr_var = sum((z - mean_zcr) ** 2 for z in zcr_values) / len(zcr_values)
+                zcr_cv = math.sqrt(zcr_var) / mean_zcr
+
+                if 0.2 <= zcr_cv <= 1.8:
+                    scores.append(1.0)
+                else:
+                    scores.append(0.4)
+                    issues.append(f"过零率变异异常: {zcr_cv:.2f}")
+
+        # --- 检测 4: 时长与字数的匹配度 ---
+        char_count = len(re.sub(r'\s', '', original_text))
+        if char_count > 0 and duration_sec > 0:
+            chars_per_sec = char_count / duration_sec
+            # 正常中文朗读约 4-7 字/秒
+            if 2.5 <= chars_per_sec <= 10:
+                scores.append(1.0)
+            else:
+                scores.append(0.4)
+                issues.append(f"语速异常: {chars_per_sec:.1f}字/s")
+
+        # 综合评分
+        avg_score = sum(scores) / len(scores) if scores else 0
+        is_normal = avg_score >= 0.7 and len(issues) <= 1
+
+        detail = "正常" if is_normal else "; ".join(issues)
+        return is_normal, avg_score, detail
+
+    def _quick_stt(self, audio_path: str) -> str:
+        """
+        快速 STT：用 DashScope Paraformer 识别合成音频。
+        只取文本，不需要时间戳。
+        """
+        from dashscope.audio.asr import Recognition
+
+        # 根据路径类型选择不同的调用方式
+        if audio_path.startswith("http"):
+            result = Recognition.call(
+                model="paraformer-realtime-v2",
+                format="mp3",
+                sample_rate=16000,
+                file_urls=[audio_path],
+            )
+        else:
+            # 本地文件：读取二进制数据
+            with open(audio_path, "rb") as f:
+                audio_data = f.read()
+            result = Recognition.call(
+                model="paraformer-realtime-v2",
+                format="mp3",
+                sample_rate=16000,
+                audio=audio_data,
+            )
+
+        if result.status_code == 200:
+            sentences = result.output.get("sentence", [])
+            return "".join(s.get("text", "") for s in sentences)
+
+        return ""
+
+    @staticmethod
+    def _text_similarity(text_a: str, text_b: str) -> float:
+        """
+        计算两段文本的字符级相似度。
+        用编辑距离的归一化版本，不依赖任何外部库。
+        """
+        # 预处理：去标点空格，只保留中文和字母数字
+        import re
+        def clean(t):
+            return re.sub(r'[^\u4e00-\u9fff\w]', '', t.lower())
+
+        a = clean(text_a)
+        b = clean(text_b)
+
+        if not a or not b:
+            return 0.0
+
+        # 用字符级别的 Jaccard 相似度（快速粗略）
+        # 对于短文本足够判断是否是乱码
+        set_a = set(a)
+        set_b = set(b)
+        intersection = set_a & set_b
+        union = set_a | set_b
+
+        if not union:
+            return 0.0
+
+        jaccard = len(intersection) / len(union)
+
+        # 再算一个序列匹配分数（检测顺序是否一致）
+        # 用最长公共子序列比率
+        lcs_len = CosyVoiceTTS._lcs_length(a[:100], b[:100])  # 限制长度避免慢
+        max_len = max(len(a[:100]), len(b[:100]))
+        seq_score = lcs_len / max_len if max_len > 0 else 0
+
+        # 综合分数
+        return 0.4 * jaccard + 0.6 * seq_score
+
+    @staticmethod
+    def _lcs_length(a: str, b: str) -> int:
+        """最长公共子序列长度（DP，用于文本相似度计算）"""
+        m, n = len(a), len(b)
+        if m == 0 or n == 0:
+            return 0
+        # 空间优化：只用两行
+        prev = [0] * (n + 1)
+        curr = [0] * (n + 1)
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if a[i - 1] == b[j - 1]:
+                    curr[j] = prev[j - 1] + 1
+                else:
+                    curr[j] = max(prev[j], curr[j - 1])
+            prev, curr = curr, [0] * (n + 1)
+        return prev[n]
