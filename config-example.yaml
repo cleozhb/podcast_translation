@@ -98,6 +98,17 @@ diarization:
     sample_rate: 16000
 
 
+# ---- TTS 文本预处理 ----
+tts_preprocess:
+  # 长句断句阈值（超过此字数自动在逗号处断开）
+  max_sentence_chars: 80
+  # 自定义英文词汇 → 中文读音映射（追加到内置词汇表）
+  # 根据你翻译的播客内容按需扩充
+  custom_word_map:
+    # "Quad Code": "Quad Code"
+    # "Cowork": "Cowork"
+    # "Semianalysis": "Semi analysis"
+
 # ---- 输出目录 ----
 output:
   base_dir: "./output"

@@ -16,7 +16,7 @@ from providers.base import (
 )
 from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult, VoiceprintInfo, SpeakerSegment
 from core.progress import ProgressTracker
-from core.tts_preprocessor import preprocess_for_tts, preprocess_speaker_translations
+from core.tts_preprocessor import preprocess_for_tts, preprocess_speaker_translations, PreprocessConfig
 
 
 @dataclass
@@ -782,24 +782,31 @@ class Pipeline:
         safe_name = re.sub(r'[^\w\-]', '_', safe_name)
         output_path = os.path.join(self.final_dir, f"{safe_name}_zh.mp3")
 
+        # 构建 TTS 预处理配置
+        tts_pre_cfg = self.config.get("tts_preprocess", {})
+        preprocess_config = PreprocessConfig(
+            max_sentence_chars=tts_pre_cfg.get("max_sentence_chars", 80),
+            custom_word_map=tts_pre_cfg.get("custom_word_map"),
+        )
+
         has_multi_voice = (
             ctx.speaker_translations
             and len(ctx.voiceprint_oss_urls) > 1
         )
 
         if has_multi_voice:
-            self._synthesize_multi_speaker(ctx, output_path)
+            self._synthesize_multi_speaker(ctx, output_path, preprocess_config)
         else:
-            self._synthesize_single(ctx, output_path)
+            self._synthesize_single(ctx, output_path, preprocess_config)
 
         ctx.final_audio_path = output_path
 
-    def _synthesize_single(self, ctx: PipelineContext, output_path: str):
+    def _synthesize_single(self, ctx: PipelineContext, output_path: str, preprocess_config: PreprocessConfig):
         """单音色合成"""
         voice_url = ctx.voiceprint_oss_url or None
         print(f"  🔊 单音色合成模式")
 
-        text = preprocess_for_tts(ctx.translation.translated_text)
+        text = preprocess_for_tts(ctx.translation.translated_text, preprocess_config)
         print(f"  🔧 TTS 预处理完成")
 
         try:
@@ -815,7 +822,7 @@ class Pipeline:
                 voice_url=voice_url,
             )
 
-    def _synthesize_multi_speaker(self, ctx: PipelineContext, output_path: str):
+    def _synthesize_multi_speaker(self, ctx: PipelineContext, output_path: str, preprocess_config: PreprocessConfig):
         """
         多音色合成：按说话人分段合成，每段用对应的声纹，最后拼接。
         """
@@ -840,7 +847,7 @@ class Pipeline:
         temp_files = []
         total = len(ctx.speaker_translations)
 
-        preprocess_speaker_translations(ctx.speaker_translations)
+        preprocess_speaker_translations(ctx.speaker_translations, preprocess_config)
         print(f"  🔧 TTS 预处理完成（{total} 段文本）")
 
         try:
