@@ -16,6 +16,7 @@ from providers.base import (
 )
 from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult, VoiceprintInfo, SpeakerSegment
 from core.progress import ProgressTracker
+from core.tts_preprocessor import preprocess_for_tts, preprocess_speaker_translations
 
 
 @dataclass
@@ -798,15 +799,18 @@ class Pipeline:
         voice_url = ctx.voiceprint_oss_url or None
         print(f"  🔊 单音色合成模式")
 
+        text = preprocess_for_tts(ctx.translation.translated_text)
+        print(f"  🔧 TTS 预处理完成")
+
         try:
             ctx.tts_result = self.tts.synthesize_long(
-                text=ctx.translation.translated_text,
+                text=text,
                 output_path=output_path,
                 voice_url=voice_url,
             )
         except NotImplementedError:
             ctx.tts_result = self.tts.synthesize(
-                text=ctx.translation.translated_text,
+                text=text,
                 output_path=output_path,
                 voice_url=voice_url,
             )
@@ -835,6 +839,9 @@ class Pipeline:
         combined = PydubSegment.empty()
         temp_files = []
         total = len(ctx.speaker_translations)
+
+        preprocess_speaker_translations(ctx.speaker_translations)
+        print(f"  🔧 TTS 预处理完成（{total} 段文本）")
 
         try:
             for i, item in enumerate(ctx.speaker_translations, 1):
