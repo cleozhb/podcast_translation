@@ -16,6 +16,7 @@ dependencies = [
     "dashscope>=1.20",
     "oss2>=2.18",
     "certifi>=2024.0",
+    "numpy>=2.4.3",
 ]
 
 [project.optional-dependencies]

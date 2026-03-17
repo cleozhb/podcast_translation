@@ -7,7 +7,6 @@ providers/cosyvoice_tts.py
 
 import ssl
 import os
-import time
 import certifi
 
 # ============================================================
@@ -74,7 +73,7 @@ class CosyVoiceTTS(TTSProvider):
         # 合成质量验证配置
         quality_cfg = cv.get("quality_verify", {})
         self.verify_quality = quality_cfg.get("enabled", False)
-        self.similarity_threshold = quality_cfg.get("similarity_threshold", 0.35)
+        self.similarity_threshold = quality_cfg.get("similarity_threshold", 0.8)
         self.max_verify_retries = quality_cfg.get("max_retries", 3)
 
     def synthesize(self, text: str, output_path: str, voice_url: str = None) -> TTSResult:
@@ -405,45 +404,227 @@ class CosyVoiceTTS(TTSProvider):
         
     def _verify_quality(self, original_text: str, audio_path: str) -> tuple[bool, float, str]:
         """
-        分层质量检测：
-        Layer 1: 本地音频特征检测（零成本）
-        Layer 2: 只有 Layer 1 可疑时才调 STT 做精确验证（低成本）
+        三层质量检测：
+          Layer 1: 文本风险评估（零成本）
+          Layer 2: 音频多特征投票（零成本）
+          Layer 3: STT 反向验证（有成本，仅对可疑段）
 
-        Returns:
-            (is_ok, score, detail_message)
+        决策矩阵:
+          文本低风险 + 音频 ≤1票 → 放行
+          文本低风险 + 音频 ≥2票 → STT 验证
+          文本中风险 + 音频 ≤1票 → 放行
+          文本中风险 + 音频 ≥2票 → STT 验证
+          文本高风险              → STT 验证（不看音频）
         """
-        # Layer 1: 本地音频特征检测
-        try:
-            is_normal, local_score, local_detail = self._check_audio_features(
-                original_text, audio_path
-            )
-            if is_normal:
-                return True, local_score, f"本地检测通过: {local_detail}"
+        # Layer 1: 文本风险
+        text_risk, risk_reasons = self._assess_text_risk(original_text)
 
-            print(f"     🔍 本地检测可疑 ({local_detail})，启动 STT 验证...")
-        except Exception as e:
-            print(f"     ⚠️ 本地检测异常，跳过: {e}")
-            # 本地检测失败不阻塞，直接放行
-            return True, -1.0, f"本地检测跳过: {e}"
+        if text_risk == "low":
+            # Layer 2: 音频特征投票
+            try:
+                audio_score = self._audio_vote(audio_path)
+                votes = audio_score["votes"]
+                total = audio_score["total"]
 
-        # Layer 2: STT 反向验证（仅对可疑段）
+                if votes <= 1:
+                    return True, 1.0, f"文本低风险 + 音频正常 ({votes}/{total}票)"
+                else:
+                    print(f"     🔍 文本低风险但音频可疑 ({votes}/{total}票)，启动 STT 验证...")
+            except Exception as e:
+                print(f"     ⚠️ 音频检测异常: {e}，放行")
+                return True, -1.0, f"音频检测跳过: {e}"
+
+        elif text_risk == "medium":
+            # 中风险：也先看音频投票，投票低就放行
+            try:
+                audio_score = self._audio_vote(audio_path)
+                votes = audio_score["votes"]
+                total = audio_score["total"]
+
+                if votes <= 1:
+                    return True, 0.8, f"文本中风险但音频良好 ({votes}/{total}票)"
+                else:
+                    print(f"     🔍 文本中风险 ({'; '.join(risk_reasons)}) + 音频 {votes}/{total}票，启动 STT 验证...")
+            except Exception as e:
+                print(f"     🔍 文本中风险 ({'; '.join(risk_reasons)})，音频检测异常，启动 STT 验证...")
+
+        else:
+            # 高风险：直接 STT，不看音频
+            print(f"     🔍 文本高风险 ({'; '.join(risk_reasons)})，直接 STT 验证...")
+
+        # Layer 3: STT 反向验证
         try:
             recognized = self._quick_stt(audio_path)
             if not recognized:
                 return False, 0.0, "STT 未识别出任何文字"
 
             score = self._text_similarity(original_text, recognized)
-
             if score >= self.similarity_threshold:
-                return True, score, "STT 验证通过"
+                return True, score, f"STT 验证通过 ({score:.2f})"
             else:
-                orig_short = original_text[:30]
                 recog_short = recognized[:30]
-                return False, score, f"原: {orig_short}… → 识: {recog_short}…"
+                return False, score, f"STT 相似度低: {score:.2f}, 识别: {recog_short}…"
 
         except Exception as e:
-            print(f"     ⚠️ STT 验证异常，跳过: {e}")
+            if text_risk == "high":
+                return False, 0.0, f"高风险段 STT 异常: {e}"
             return True, -1.0, f"STT 跳过: {e}"
+
+    def _audio_vote(self, audio_path: str) -> dict:
+        """
+        多特征投票检测。
+        基于正常/异常音频的统计差异，5 个特征投票。
+        """
+        import numpy as np
+        from pydub import AudioSegment as PydubSeg
+        import struct as st
+
+        audio = PydubSeg.from_file(audio_path)
+        audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
+        raw = np.array(st.unpack(f"<{len(audio.raw_data)//2}h", audio.raw_data), dtype=np.float32) / 32768.0
+        sr = 16000
+        duration = len(raw) / sr
+
+        # --- 特征 1: peaks_per_sec ---
+        frame_len = int(sr * 0.02)
+        hop = frame_len // 2
+        energies = [np.sqrt(np.mean(raw[i:i+frame_len]**2)) for i in range(0, len(raw)-frame_len, hop)]
+        energies = np.array(energies)
+        peaks = []
+        if len(energies) > 10:
+            sm = np.convolve(energies, np.ones(5)/5, mode='same')
+            thresh = np.mean(sm) * 0.5
+            for i in range(1, len(sm)-1):
+                if sm[i] > sm[i-1] and sm[i] > sm[i+1] and sm[i] > thresh:
+                    peaks.append(i)
+        peaks_per_sec = len(peaks) / duration if duration > 0 else 0
+
+        # 音节间隔
+        interval_mean_ms = np.mean(np.diff(peaks) * 10) if len(peaks) >= 3 else 999
+
+        # --- 特征 2-4: 频谱 ---
+        frame_spec = int(sr * 0.03)
+        hop_spec = frame_spec // 2
+        centroids, fluxes = [], []
+        prev = None
+        for start in range(0, len(raw)-frame_spec, hop_spec):
+            frame = raw[start:start+frame_spec]
+            spec = np.abs(np.fft.rfft(frame * np.hanning(len(frame))))
+            freqs = np.fft.rfftfreq(len(frame), 1.0/sr)
+            if np.sum(spec) > 0:
+                centroids.append(np.sum(freqs * spec) / np.sum(spec))
+                if prev is not None and len(prev) == len(spec):
+                    fluxes.append(np.sqrt(np.mean((spec - prev)**2)))
+                prev = spec
+
+        centroid_mean = np.mean(centroids) if centroids else 0
+        flux_mean = np.mean(fluxes) if fluxes else 0
+        flux_cv = (np.std(fluxes) / np.mean(fluxes)) if fluxes and np.mean(fluxes) > 0 else 0
+
+        # --- 投票 ---
+        # 阈值 = 正常均值 + 40% × (异常均值 - 正常均值)
+        # 方向: low = 低于阈值为异常, high = 高于阈值为异常
+        rules = [
+            ("flux_mean",        flux_mean,        "low",  0.49 + 0.4 * (0.31 - 0.49)),      # 0.418
+            ("peaks_per_sec",    peaks_per_sec,    "low",  6.62 + 0.4 * (5.15 - 6.62)),      # 6.032
+            ("interval_mean_ms", interval_mean_ms, "high", 149.85 + 0.4 * (197.97 - 149.85)),# 169.10
+            ("flux_cv",          flux_cv,          "high", 0.89 + 0.4 * (1.04 - 0.89)),      # 0.95
+            ("centroid_mean",    centroid_mean,     "high", 1596.66 + 0.4 * (1949.13 - 1596.66)), # 1737.65
+        ]
+
+        votes = 0
+        details = []
+        for name, val, direction, threshold in rules:
+            if direction == "high":
+                abnormal = val > threshold
+            else:
+                abnormal = val < threshold
+            if abnormal:
+                votes += 1
+            details.append(f"{'✗' if abnormal else '✓'} {name}={val:.2f} (阈值{threshold:.2f})")
+
+        return {"votes": votes, "total": len(rules), "details": details}
+
+    @staticmethod
+    def _assess_text_risk(text: str) -> tuple[str, list[str]]:
+        """
+        评估文本送给 TTS 后出乱码的风险。
+        纯规则判断，零成本。
+
+        Returns:
+            ("low" | "medium" | "high", [原因列表])
+        """
+        import re
+        # 清理 [SPEAKER_xx] 标记，避免误判
+        text = re.sub(r'\[SPEAKER_\d+\]\s*', '', text)
+        reasons = []
+        score = 0
+
+        # 1. 英文字符占比
+        total_chars = len(re.sub(r'\s', '', text))
+        if total_chars > 0:
+            en_chars = len(re.findall(r'[a-zA-Z]', text))
+            en_ratio = en_chars / total_chars
+            if en_ratio > 0.3:
+                score += 3
+                reasons.append(f"英文占比高: {en_ratio:.0%}")
+            elif en_ratio > 0.15:
+                score += 1
+                reasons.append(f"英文占比中: {en_ratio:.0%}")
+
+        # 2. 连续英文单词（3个以上连续英文词容易崩）
+        long_en = re.findall(r'(?:[a-zA-Z]+[\s\-]){2,}[a-zA-Z]+', text)
+        if long_en:
+            score += 2
+            reasons.append(f"连续英文词组: {len(long_en)}处")
+
+        # 3. 特殊标点密度（引号、破折号、括号嵌套）
+        special_puncts = len(re.findall(r'[""''「」『』【】——…]', text))
+        if special_puncts > 5:
+            score += 2
+            reasons.append(f"特殊标点多: {special_puncts}个")
+        elif special_puncts > 2:
+            score += 1
+            reasons.append(f"特殊标点: {special_puncts}个")
+
+        # 4. 单句过长（没有句号的连续文本）
+        sentences = re.split(r'[。！？!?]', text)
+        max_sent_len = max((len(s.strip()) for s in sentences if s.strip()), default=0)
+        if max_sent_len > 100:
+            score += 2
+            reasons.append(f"超长句: {max_sent_len}字")
+        elif max_sent_len > 60:
+            score += 1
+            reasons.append(f"长句: {max_sent_len}字")
+
+        # 5. 中英文频繁切换（如"用AI来做API的调用"这种）
+        switches = len(re.findall(r'[\u4e00-\u9fff][a-zA-Z]|[a-zA-Z][\u4e00-\u9fff]', text))
+        if switches > 6:
+            score += 2
+            reasons.append(f"中英切换频繁: {switches}次")
+        elif switches > 3:
+            score += 1
+            reasons.append(f"中英切换: {switches}次")
+
+        # 6. 数字和特殊格式
+        numbers = re.findall(r'\d+(?:\.\d+)?%?', text)
+        if len(numbers) > 5:
+            score += 1
+            reasons.append(f"数字多: {len(numbers)}个")
+
+        # 7. URL 或类 URL 文本
+        if re.search(r'https?://|www\.|\.com|\.io', text):
+            score += 3
+            reasons.append("含 URL")
+
+        # 判定风险等级
+        if score >= 5:
+            return "high", reasons
+        elif score >= 2:
+            return "medium", reasons
+        else:
+            return "low", reasons
+
 
     def _check_audio_features(
         self, original_text: str, audio_path: str
@@ -455,6 +636,8 @@ class CosyVoiceTTS(TTSProvider):
         1. 音节密度：正常中文约 3-5 音节/秒，对应特定的静音/发声切换频率
         2. 能量稳定性：正常语音能量变化有规律，乱码能量分布异常
         3. 有效语音占比：正常语音中发声段应占合理比例
+
+        所有与语速相关的阈值会自动乘以 self.speech_rate 适配加速/减速场景。
 
         Returns:
             (is_normal, confidence_score, detail)
@@ -474,8 +657,16 @@ class CosyVoiceTTS(TTSProvider):
         audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
         samples = struct.unpack(f"<{len(audio.raw_data) // 2}h", audio.raw_data)
 
+        # 预处理原文：去除 [SPEAKER_xx] 标记、标点、空白
+        clean_text = re.sub(r'\[SPEAKER_\d+\]', '', original_text)
+        clean_text = re.sub(r'\s+', '', clean_text)
+
+        # 语速因子：所有与语速相关的阈值按此倍率缩放
+        rate = self.speech_rate
+
         issues = []
         scores = []
+        sub_details = []
 
         # --- 检测 1: 静音/发声切换频率（音节节奏） ---
         nonsilent = silence.detect_nonsilent(
@@ -483,18 +674,20 @@ class CosyVoiceTTS(TTSProvider):
         )
         if nonsilent:
             switches_per_sec = len(nonsilent) / duration_sec
-            # 正常中文：每秒 2-8 次切换
-            if 1.5 <= switches_per_sec <= 12:
+            lo = 1.0 * rate
+            hi = 12.0 * rate
+            if lo <= switches_per_sec <= hi:
                 scores.append(1.0)
             else:
                 scores.append(0.3)
-                issues.append(f"切换频率异常: {switches_per_sec:.1f}/s")
+                issues.append(f"切换频率异常: {switches_per_sec:.1f}/s (期望{lo:.1f}-{hi:.1f})")
+            sub_details.append(f"{switches_per_sec:.1f}/s (期望{lo:.1f}-{hi:.1f})")
         else:
             scores.append(0.2)
             issues.append("未检测到语音段")
+            sub_details.append("无语音段")
 
         # --- 检测 2: 能量变化规律性 ---
-        # 把音频分成 50ms 帧，计算每帧 RMS
         frame_size = 800  # 50ms at 16kHz
         frames = [
             samples[i:i + frame_size]
@@ -509,23 +702,23 @@ class CosyVoiceTTS(TTSProvider):
             mean_rms = sum(rms_values) / len(rms_values)
             if mean_rms > 0:
                 variance = sum((r - mean_rms) ** 2 for r in rms_values) / len(rms_values)
-                cv = math.sqrt(variance) / mean_rms  # 变异系数
+                cv = math.sqrt(variance) / mean_rms
 
-                # 正常语音的变异系数通常在 0.5-2.0 之间
-                # 乱码往往过高（杂乱）或过低（单调嗡嗡声）
                 if 0.3 <= cv <= 2.5:
                     scores.append(1.0)
                 else:
                     scores.append(0.3)
                     issues.append(f"能量变异系数异常: {cv:.2f}")
+                sub_details.append(f"CV={cv:.2f} (期望0.3-2.5)")
             else:
                 scores.append(0.2)
                 issues.append("音频能量为零")
+                sub_details.append("能量=0")
         else:
             scores.append(0.5)
+            sub_details.append("帧数不足")
 
         # --- 检测 3: 过零率一致性 ---
-        # 正常语音的过零率在帧间有规律波动，乱码的帧间过零率方差更大
         if len(frames) > 4:
             zcr_values = []
             for frame in frames:
@@ -545,56 +738,72 @@ class CosyVoiceTTS(TTSProvider):
                 else:
                     scores.append(0.4)
                     issues.append(f"过零率变异异常: {zcr_cv:.2f}")
+                sub_details.append(f"CV={zcr_cv:.2f} (期望0.2-1.8)")
 
         # --- 检测 4: 时长与字数的匹配度 ---
-        char_count = len(re.sub(r'\s', '', original_text))
+        char_count = len(clean_text)
         if char_count > 0 and duration_sec > 0:
             chars_per_sec = char_count / duration_sec
-            # 正常中文朗读约 4-7 字/秒
-            if 2.5 <= chars_per_sec <= 10:
+            lo = 2.0 * rate
+            hi = 9.0 * rate
+            if lo <= chars_per_sec <= hi:
                 scores.append(1.0)
             else:
                 scores.append(0.4)
-                issues.append(f"语速异常: {chars_per_sec:.1f}字/s")
+                issues.append(f"语速异常: {chars_per_sec:.1f}字/s (期望{lo:.1f}-{hi:.1f})")
+            sub_details.append(f"{chars_per_sec:.1f}字/s (期望{lo:.1f}-{hi:.1f})")
 
         # 综合评分
         avg_score = sum(scores) / len(scores) if scores else 0
-        is_normal = avg_score >= 0.7 and len(issues) <= 1
+        is_normal = avg_score >= 0.85 and len(issues) == 0
+
+        # 打印每个子维度的分数
+        dim_names = ["切换频率", "能量稳定", "过零率", "字速匹配"]
+        for i, sd in enumerate(sub_details):
+            name = dim_names[i] if i < len(dim_names) else f"维度{i+1}"
+            s = scores[i] if i < len(scores) else 0
+            mark = "✓" if s >= 0.8 else "✗"
+            print(f"       [{name}] {s:.1f}分 {mark}  {sd}")
 
         detail = "正常" if is_normal else "; ".join(issues)
         return is_normal, avg_score, detail
 
     def _quick_stt(self, audio_path: str) -> str:
         """
-        快速 STT：用 DashScope Paraformer 识别合成音频。
+        快速 STT：用 DashScope Recognition 同步识别合成音频。
         只取文本，不需要时间戳。
+
+        Recognition 要求 wav 16kHz 输入，所以先用 pydub 转格式。
         """
-        from dashscope.audio.asr import Recognition
+        from dashscope.audio.asr import Recognition, RecognitionCallback
+        from pydub import AudioSegment
+        import tempfile
+        import os
 
-        # 根据路径类型选择不同的调用方式
-        if audio_path.startswith("http"):
-            result = Recognition.call(
+        # 转为 wav 16kHz 单声道（Recognition 对 mp3 22050Hz 不稳定）
+        audio = AudioSegment.from_file(audio_path)
+        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        wav_path = tempfile.mktemp(suffix=".wav")
+        try:
+            audio.export(wav_path, format="wav")
+
+            callback = RecognitionCallback()
+            recognition = Recognition(
                 model="paraformer-realtime-v2",
-                format="mp3",
+                format="wav",
                 sample_rate=16000,
-                file_urls=[audio_path],
+                callback=callback,
             )
-        else:
-            # 本地文件：读取二进制数据
-            with open(audio_path, "rb") as f:
-                audio_data = f.read()
-            result = Recognition.call(
-                model="paraformer-realtime-v2",
-                format="mp3",
-                sample_rate=16000,
-                audio=audio_data,
-            )
+            result = recognition.call(wav_path)
 
-        if result.status_code == 200:
-            sentences = result.output.get("sentence", [])
-            return "".join(s.get("text", "") for s in sentences)
-
-        return ""
+            if result.status_code == 200:
+                sentences = result.get_sentence()
+                if sentences:
+                    return "".join(s.get("text", "") for s in sentences)
+            return ""
+        finally:
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
 
     @staticmethod
     def _text_similarity(text_a: str, text_b: str) -> float:
@@ -602,9 +811,10 @@ class CosyVoiceTTS(TTSProvider):
         计算两段文本的字符级相似度。
         用编辑距离的归一化版本，不依赖任何外部库。
         """
-        # 预处理：去标点空格，只保留中文和字母数字
+        # 预处理：去 [SPEAKER_xx] 标记、标点空格，只保留中文和字母数字
         import re
         def clean(t):
+            t = re.sub(r'\[SPEAKER_\d+\]', '', t)
             return re.sub(r'[^\u4e00-\u9fff\w]', '', t.lower())
 
         a = clean(text_a)

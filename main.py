@@ -13,6 +13,7 @@ main.py
     
     # 用本地文件做测试
     python main.py --local-file /home/zhanghuibin02/code/podcast_translation/output/audio/what_happens_after_coding_is_solved_clip_5min.mp3 --name "podcast" --title "what_happens_after_coding_is_solved_clip_5min" --no-resume
+    python main.py --local-file /home/zhanghuibin02/code/podcast_translation/output/audio/what_happens_after_coding_is_solved_clip_head_10min.mp3 --name "podcast" --title "what_happens_after_coding_is_solved_clip_10min" --no-resume
 """
 
 import os
@@ -23,8 +24,6 @@ import feedparser
 import requests
 
 from core.pipeline import Pipeline
-from providers.base import STTProvider, LLMProvider, TTSProvider, StorageProvider
-
 
 # ============================================================
 # 已验证有效的 RSS Feed（来自之前的验证工作）
@@ -34,6 +33,7 @@ FEEDS = [
     ("科技", "Y Combinator", "https://anchor.fm/s/8c1524bc/podcast/rss"),
     ("科技", "a16z Podcast", "https://feeds.simplecast.com/JGE3yC0V"),
     ("科技", "Moonshots", "https://feeds.megaphone.fm/DVVTS2890392624"),
+    ("科技", "The MAD Podcast with Matt Turck", "https://anchor.fm/s/f2ee4948/podcast/rss"),
     ("科技", "The Vergecast", "https://feeds.megaphone.fm/vergecast"),
     ("科技", "Hard Fork (NYT)", "https://feeds.simplecast.com/l2i9YnTd"),
     ("科技", "The Changelog", "https://changelog.com/podcast/feed"),

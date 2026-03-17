@@ -76,3 +76,6 @@ podcast-translator/
     ├── voiceprints/            # 提取的声纹片段
     └── final/                  # 最终中文音频
 ```
+
+todo:
+1. 人工控制步骤：先只做英文转中文，用便宜模型，先看文本大概看看内容是否感兴趣
