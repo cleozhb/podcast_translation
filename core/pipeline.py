@@ -846,6 +846,7 @@ class Pipeline:
         combined = PydubSegment.empty()
         temp_files = []
         total = len(ctx.speaker_translations)
+        quality_warnings = []  # 收集质量警告：[(index, timestamp, text, reason)]
 
         preprocess_speaker_translations(ctx.speaker_translations, preprocess_config)
         print(f"  🔧 TTS 预处理完成（{total} 段文本）")
@@ -867,30 +868,63 @@ class Pipeline:
                 role = "主持人" if any(
                     vp.speaker == speaker and vp.is_host for vp in ctx.voiceprints
                 ) else "嘉宾"
+                # 格式化原始音频时间戳
+                start_sec = item.get("start", 0)
+                end_sec = item.get("end", 0)
+                def _ts(s):
+                    m, sec = divmod(int(s), 60)
+                    h, m = divmod(m, 60)
+                    return f"{h:02d}:{m:02d}:{sec:02d}"
+                ts_str = f"{_ts(start_sec)}-{_ts(end_sec)}"
                 print(f"     [{i:3d}/{total}] {speaker} [{role}] "
-                      f"({len(text)}字): {text[:30]}...")
+                      f"[{ts_str}] ({len(text)}字): {text[:30]}...")
 
                 temp_path = tempfile.mktemp(suffix=".mp3")
                 temp_files.append(temp_path)
 
-                # 合成单段（长文本自动分段，避免超出 API 限制导致音频异常）
-                from providers.cosyvoice_tts import CosyVoiceTTS
-                if isinstance(self.tts, CosyVoiceTTS) and len(text) > 300:
-                    self.tts.synthesize_long(
-                        text=text,
-                        output_path=temp_path,
-                        voice_url=voice_url,
-                        max_chars=300,
-                    )
-                else:
-                    self.tts.synthesize(
-                        text=text,
-                        output_path=temp_path,
-                        voice_url=voice_url,
-                    )
+                try:
+                    # 合成单段（长文本自动分段，避免超出 API 限制导致音频异常）
+                    from providers.cosyvoice_tts import CosyVoiceTTS
+                    if isinstance(self.tts, CosyVoiceTTS) and len(text) > 300:
+                        tts_result = self.tts.synthesize_long(
+                            text=text,
+                            output_path=temp_path,
+                            voice_url=voice_url,
+                            max_chars=300,
+                        )
+                    else:
+                        tts_result = self.tts.synthesize(
+                            text=text,
+                            output_path=temp_path,
+                            voice_url=voice_url,
+                        )
 
-                segment = PydubSegment.from_file(temp_path)
-                combined += segment
+                    # 检查质量警告（synthesize 降级返回时会设置此字段）
+                    if tts_result and getattr(tts_result, 'quality_warning', ''):
+                        warning_info = (i, ts_str, text, tts_result.quality_warning)
+                        quality_warnings.append(warning_info)
+                        print(f"\n{'='*60}")
+                        print(f"  🚨 TTS 质量警告 [{i}/{total}] [{ts_str}]")
+                        print(f"  文本: {text[:80]}{'...' if len(text) > 80 else ''}")
+                        print(f"  原因: {tts_result.quality_warning}")
+                        print(f"  处理: 使用当前音频继续（质量可能有问题）")
+                        print(f"{'='*60}\n")
+
+                    segment = PydubSegment.from_file(temp_path)
+                    combined += segment
+                except Exception as e:
+                    # 单段合成失败，记录警告但不中断整个流程
+                    warning_info = (i, ts_str, text, str(e))
+                    quality_warnings.append(warning_info)
+                    print(f"\n{'='*60}")
+                    print(f"  🚨 TTS 合成失败 [{i}/{total}] [{ts_str}]")
+                    print(f"  文本: {text[:80]}{'...' if len(text) > 80 else ''}")
+                    print(f"  错误: {e}")
+                    print(f"  处理: 跳过此段，插入静音替代")
+                    print(f"{'='*60}\n")
+                    # 插入等时长静音替代（按字数估算：约 5 字/秒）
+                    silence_ms = max(1000, int(len(text) / 5 * 1000))
+                    combined += PydubSegment.silent(duration=silence_ms)
 
                 # 说话人切换时加短暂停顿（更自然）
                 if i < total:
@@ -904,6 +938,21 @@ class Pipeline:
 
             ctx.tts_result = TTSResult(audio_path=output_path, duration=duration)
             print(f"  ✅ 多音色合成完成: {output_path} ({duration:.1f}s)")
+
+            # 打印音频特征投票统计汇总
+            from providers.cosyvoice_tts import CosyVoiceTTS
+            if isinstance(self.tts, CosyVoiceTTS):
+                self.tts.print_vote_summary()
+
+            # 汇总所有质量警告
+            if quality_warnings:
+                print(f"\n{'='*60}")
+                print(f"  ⚠️ TTS 质量警告汇总: {len(quality_warnings)} 段有问题")
+                print(f"{'='*60}")
+                for idx, ts, txt, reason in quality_warnings:
+                    print(f"  [{idx:3d}/{total}] [{ts}] {txt[:50]}...")
+                    print(f"           原因: {reason}")
+                print(f"{'='*60}\n")
 
         finally:
             for f in temp_files:

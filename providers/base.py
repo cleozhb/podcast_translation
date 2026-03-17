@@ -61,6 +61,7 @@ class TTSResult:
     audio_path: str = ""      # 本地音频文件路径
     duration: float = 0.0     # 时长（秒）
     sample_rate: int = 0
+    quality_warning: str = "" # 质量验证失败时的警告信息（非空表示降级通过）
 
 
 def _fmt_time(seconds: float) -> str:

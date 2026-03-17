@@ -76,9 +76,20 @@ class CosyVoiceTTS(TTSProvider):
         self.similarity_threshold = quality_cfg.get("similarity_threshold", 0.8)
         self.max_verify_retries = quality_cfg.get("max_retries", 3)
 
+        # 音频投票统计：每个特征被投异常票的次数、总投票次数
+        self._vote_stats = {
+            "total_segments": 0,       # 经过投票的段数
+            "feature_abnormal": {},    # {feature_name: abnormal_count}
+            "feature_total": {},       # {feature_name: total_count}
+            "vote_distribution": {},   # {votes_count: segment_count} e.g. {0: 10, 1: 5, 3: 2}
+        }
+
     def synthesize(self, text: str, output_path: str, voice_url: str = None) -> TTSResult:
         """
         合成语音（带质量验证和自动重试）。
+
+        质量验证失败时不会抛出异常，而是打印醒目警告并返回当前音频，
+        避免单段失败导致整个流程中断。
 
         Args:
             text: 要合成的中文文本
@@ -86,7 +97,9 @@ class CosyVoiceTTS(TTSProvider):
             voice_url: 声纹参考音频的公网 URL(OSS 地址) 或 音色 ID(voice_id)
         """
         max_attempts = self.max_verify_retries if self.verify_quality else 1
+        last_result = None
         last_error = None
+        last_detail = ""
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
@@ -94,6 +107,7 @@ class CosyVoiceTTS(TTSProvider):
 
             try:
                 result = self._synthesize_once(text, output_path, voice_url)
+                last_result = result
             except Exception as e:
                 last_error = e
                 continue
@@ -107,12 +121,17 @@ class CosyVoiceTTS(TTSProvider):
                     return result
                 else:
                     print(f"     ⚠️ 质量不合格 (score={score:.2f}): {detail}")
-                    last_error = RuntimeError(f"质量验证失败: {detail}")
+                    last_detail = detail
                     continue
             else:
                 return result
 
-        # 所有重试都失败
+        # 所有重试都失败 —— 降级处理：返回当前音频但标记质量警告
+        if last_result:
+            last_result.quality_warning = last_detail or str(last_error)
+            return last_result
+
+        # 合成本身就失败了（非质量问题），仍需抛出
         if last_error:
             raise last_error
         raise RuntimeError("TTS 合成失败：已达最大重试次数")
@@ -543,7 +562,54 @@ class CosyVoiceTTS(TTSProvider):
                 votes += 1
             details.append(f"{'✗' if abnormal else '✓'} {name}={val:.2f} (阈值{threshold:.2f})")
 
+        # 打印每个特征的投票详情
+        print(f"     🗳️ 音频投票 ({votes}/{len(rules)}票异常):")
+        for d in details:
+            print(f"        {d}")
+
+        # 累积统计
+        stats = self._vote_stats
+        stats["total_segments"] += 1
+        stats["vote_distribution"][votes] = stats["vote_distribution"].get(votes, 0) + 1
+        for name, val, direction, threshold in rules:
+            if direction == "high":
+                abnormal = val > threshold
+            else:
+                abnormal = val < threshold
+            stats["feature_total"][name] = stats["feature_total"].get(name, 0) + 1
+            if abnormal:
+                stats["feature_abnormal"][name] = stats["feature_abnormal"].get(name, 0) + 1
+
         return {"votes": votes, "total": len(rules), "details": details}
+
+    def print_vote_summary(self):
+        """打印音频特征投票统计汇总"""
+        stats = self._vote_stats
+        total = stats["total_segments"]
+        if total == 0:
+            return
+
+        print(f"\n{'='*60}")
+        print(f"  📊 音频特征投票统计 (共 {total} 段经过投票)")
+        print(f"{'='*60}")
+
+        # 投票分布
+        print(f"  投票分布:")
+        for v in sorted(stats["vote_distribution"].keys()):
+            count = stats["vote_distribution"][v]
+            pct = count / total * 100
+            bar = "█" * int(pct / 2)
+            print(f"    {v}票异常: {count:3d}段 ({pct:5.1f}%) {bar}")
+
+        # 各特征异常率
+        print(f"  各特征异常率:")
+        for name in stats["feature_total"]:
+            ft = stats["feature_total"][name]
+            fa = stats["feature_abnormal"].get(name, 0)
+            pct = fa / ft * 100 if ft > 0 else 0
+            print(f"    {name:20s}: {fa:3d}/{ft:3d} ({pct:5.1f}%)")
+
+        print(f"{'='*60}\n")
 
     @staticmethod
     def _assess_text_risk(text: str) -> tuple[str, list[str]]:
