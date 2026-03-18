@@ -121,7 +121,10 @@ def clean_punctuation(text: str) -> str:
 
     # 删除所有引号类标点（引号不影响语音语义，但容易导致 TTS 乱码）
     # 包括：中文单双引号、英文弯引号、直引号、书名号、方括号引用
-    text = re.sub(r'[''""「」『』【】""\'\""]', '', text)
+    text = re.sub(
+        '[\u2018\u2019\u201C\u201D\u300C\u300D\u300E\u300F\u3010\u3011\u0027\u0022\u00AB\u00BB]',
+        '', text
+    )
 
     # 中文冒号 → 逗号（冒号后的停顿用逗号即可表达）
     text = text.replace('：', '，')
