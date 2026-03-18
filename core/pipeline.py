@@ -939,11 +939,6 @@ class Pipeline:
             ctx.tts_result = TTSResult(audio_path=output_path, duration=duration)
             print(f"  ✅ 多音色合成完成: {output_path} ({duration:.1f}s)")
 
-            # 打印音频特征投票统计汇总
-            from providers.cosyvoice_tts import CosyVoiceTTS
-            if isinstance(self.tts, CosyVoiceTTS):
-                self.tts.print_vote_summary()
-
             # 汇总所有质量警告
             if quality_warnings:
                 print(f"\n{'='*60}")
