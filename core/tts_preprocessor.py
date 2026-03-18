@@ -103,29 +103,40 @@ ENGLISH_TO_CHINESE_READING = {
 def clean_punctuation(text: str) -> str:
     """
     清洗特殊标点，让 TTS 更容易处理。
+    CosyVoice 对中文特殊标点（？！——""等）容易产生乱码，
+    需要转为 TTS 友好的等价标点。
     """
-    # 破折号 → 逗号+空格（TTS 模型更习惯逗号断句）
+    # 破折号 → 逗号（TTS 模型更习惯逗号断句）
     text = re.sub(r'——', '，', text)
     text = re.sub(r'—', '，', text)
     text = re.sub(r'--', '，', text)
+
+    # 中文全角问号/感叹号 → 半角（CosyVoice 对半角更稳定）
+    text = text.replace('？', '?')
+    text = text.replace('！', '!')
 
     # 省略号规范化
     text = re.sub(r'…{2,}', '……', text)
     text = re.sub(r'\.{3,}', '……', text)
 
-    # 去掉书名号内的引号嵌套（容易导致断句混乱）
-    # 如 "有点'劲爆'的问题" → "有点劲爆的问题"
-    text = re.sub(r'[''""「」『』【】]', '', text)
-    # 保留中文双引号但简化
-    text = re.sub(r'[""]', '"', text)
+    # 删除所有引号类标点（引号不影响语音语义，但容易导致 TTS 乱码）
+    # 包括：中文单双引号、英文弯引号、直引号、书名号、方括号引用
+    text = re.sub(r'[''""「」『』【】""\'\""]', '', text)
+
+    # 中文冒号 → 逗号（冒号后的停顿用逗号即可表达）
+    text = text.replace('：', '，')
+
+    # 中文分号 → 逗号
+    text = text.replace('；', '，')
 
     # 连续标点去重
     text = re.sub(r'[，,]{2,}', '，', text)
     text = re.sub(r'[。.]{2,}', '。', text)
+    text = re.sub(r'[?]{2,}', '?', text)
+    text = re.sub(r'[!]{2,}', '!', text)
 
-    # 冒号后面如果紧跟引号，简化为逗号
-    text = re.sub(r'：\s*"', '，', text)
-    text = re.sub(r':\s*"', '，', text)
+    # 句首标点清理（删除引号后可能出现句首逗号等）
+    text = re.sub(r'(?:^|(?<=\n))[，,]\s*', '', text)
 
     return text
 

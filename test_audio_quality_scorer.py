@@ -22,7 +22,11 @@ test_audio_quality_scorer.py
            output/final/error/error_article2_seg1.mp3 \
            output/final/error/error_article2_seg2.mp3 \
            output/final/error/error_article2_seg3.mp3 \
-           output/final/error/error_article2_seg4.mp3        
+           output/final/error/error_article2_seg4.mp3 \
+           output/final/error/tmpe5sg9ejb_error_error_error_error_error.mp3 \
+           output/final/error/tmpo3lk_r1y_error_error_error_error_error_23s.mp3 \
+           output/final/error/tmpyltbxo0d_error_error_error_error_error_14s.mp3 \
+           
 
     # 检测单个文件
     python test_audio_quality_scorer.py check some_audio.mp3
