@@ -165,7 +165,7 @@ def get_audio_url(entry):
 # 交互式选择
 # ============================================================
 def interactive_select(config: dict):
-    """交互式选择播客和节目，返回 (podcast_name, episode_title, audio_url)"""
+    """交互式选择播客和节目，返回 (podcast_name, episode_title, audio_url, rss_entry)"""
 
     proxy = config.get("rss", {}).get("proxy")
     timeout = config.get("rss", {}).get("timeout", 15)
@@ -242,7 +242,7 @@ def interactive_select(config: dict):
     print(f"     节目: {episode_title}")
     print(f"     音频: {audio_url[:80]}...")
 
-    return podcast_name, episode_title, audio_url
+    return podcast_name, episode_title, audio_url, entry
 
 
 # ============================================================
@@ -257,6 +257,7 @@ def main():
     parser.add_argument("--title", type=str, default="episode", help="节目标题（配合 --url 使用）")
     parser.add_argument("--skip-tts", action="store_true", help="跳过 TTS 合成")
     parser.add_argument("--skip-voiceprint", action="store_true", help="跳过声纹提取")
+    parser.add_argument("--skip-shownote", action="store_true", help="跳过 Shownote 生成")
     parser.add_argument("--no-resume", action="store_true", help="忽略已有进度，从头开始")
     args = parser.parse_args()
 
@@ -271,6 +272,7 @@ def main():
 
     # 选择节目
     local_audio_path = ""
+    rss_entry = None
     if args.local_file:
         import os
         if not os.path.isfile(args.local_file):
@@ -286,7 +288,7 @@ def main():
         episode_title = args.title
         audio_url = args.url
     else:
-        podcast_name, episode_title, audio_url = interactive_select(config)
+        podcast_name, episode_title, audio_url, rss_entry = interactive_select(config)
 
     # 确认启动
     skip_steps = []
@@ -294,6 +296,8 @@ def main():
         skip_steps.append("tts")
     if args.skip_voiceprint:
         skip_steps.append("voiceprint")
+    if args.skip_shownote:
+        skip_steps.append("shownote")
 
     print()
     if skip_steps:
@@ -306,6 +310,12 @@ def main():
 
     # 创建 Provider
     stt, llm, tts, storage = create_providers(config)
+
+    # Shownote 专用 LLM（百度千帆）
+    shownote_llm = None
+    if "shownote" not in skip_steps:
+        from providers.baidu_llm import BaiduLLM
+        shownote_llm = BaiduLLM(config)
 
     # 创建进度追踪器
     from core.progress import ProgressTracker
@@ -330,13 +340,14 @@ def main():
             print(f"  ▶️  将执行步骤: {', '.join(remaining) if remaining else '全部已完成'}")
 
     # 创建并运行 Pipeline
-    pipeline = Pipeline(config, stt, llm, tts, storage, progress=progress)
+    pipeline = Pipeline(config, stt, llm, tts, storage, progress=progress, shownote_llm=shownote_llm)
     ctx = pipeline.run(
         audio_url=audio_url,
         podcast_name=podcast_name,
         episode_title=episode_title,
         skip_steps=skip_steps,
         local_audio_path=local_audio_path,
+        rss_entry=rss_entry,
     )
 
     if progress:
@@ -350,6 +361,8 @@ def main():
         print(f"  📄 中文翻译: {ctx.translation_path}")
     if ctx.final_audio_path:
         print(f"  🔊 中文音频: {ctx.final_audio_path}")
+    if ctx.shownote_path:
+        print(f"  📝 Shownote: {ctx.shownote_path}")
 
 
 if __name__ == "__main__":

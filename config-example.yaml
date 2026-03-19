@@ -17,8 +17,6 @@ dashscope:
 # ---- 百度千帆 ----
 baidu:
   api_key: "your-baidu-api-key"
-  secret_key: "your-baidu-secret-key"
-  stt_app_id: "your-baidu-app-id"
   llm_model: "ernie-4.0-8k"
 
 # ---- 阿里云 CosyVoice TTS ----

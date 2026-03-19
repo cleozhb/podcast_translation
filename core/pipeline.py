@@ -55,6 +55,14 @@ class PipelineContext:
     tts_result: Optional[TTSResult] = None
     final_audio_path: str = ""
 
+    # Step 5 附加：TTS 各段落实际时长（用于 shownote 时间线校正）
+    tts_segment_durations: list = field(default_factory=list)  # [{original_start, original_end, chinese_start, chinese_end}]
+
+    # Step 6: Shownote
+    rss_entry: Optional[dict] = None       # RSS feedparser entry（用于提取原始 shownote）
+    shownote: object = None                # ShownoteResult
+    shownote_path: str = ""
+
     # 元数据
     start_time: float = 0.0
     step_times: dict = field(default_factory=dict)
@@ -78,6 +86,7 @@ class Pipeline:
         tts: TTSProvider,
         storage: Optional[StorageProvider] = None,
         progress: Optional[ProgressTracker] = None,
+        shownote_llm: Optional[LLMProvider] = None,
     ):
         self.config = config
         self.stt = stt
@@ -85,6 +94,7 @@ class Pipeline:
         self.tts = tts
         self.storage = storage
         self.progress = progress
+        self.shownote_llm = shownote_llm or llm  # shownote 专用 LLM，默认复用翻译 LLM
 
         # 输出目录
         out = config.get("output", {})
@@ -93,6 +103,7 @@ class Pipeline:
         self.translation_dir = out.get("translation_dir", "./output/translations")
         self.voiceprint_dir = out.get("voiceprint_dir", "./output/voiceprints")
         self.final_dir = out.get("final_dir", "./output/final")
+        self.shownote_dir = out.get("shownote_dir", "./output/shownotes")
 
         # 翻译配置
         tc = config.get("translation", {})
@@ -125,6 +136,7 @@ class Pipeline:
         episode_title: str = "",
         skip_steps: list[str] = None,
         local_audio_path: str = "",
+        rss_entry: dict = None,
     ) -> PipelineContext:
         """
         执行完整工作流。
@@ -144,6 +156,7 @@ class Pipeline:
             podcast_name=podcast_name,
             episode_title=episode_title,
             audio_url=audio_url,
+            rss_entry=rss_entry,
             start_time=time.time(),
         )
         if local_audio_path:
@@ -185,11 +198,21 @@ class Pipeline:
             # Step 4: 翻译
             self._run_step(ctx, "translate", self._translate, skip)
 
+            # 人工确认暂停（翻译完成后，TTS/shownote 之前）
+            if "tts" not in skip or "shownote" not in skip:
+                self._human_review_pause(ctx)
+
             # Step 5: TTS 合成
             if "tts" not in skip:
                 self._run_step(ctx, "tts", self._synthesize, skip)
             elif self.progress and self._episode_id:
                 self.progress.mark_step_skipped(self._episode_id, "tts")
+
+            # Step 6: Shownote 生成
+            if "shownote" not in skip:
+                self._run_step(ctx, "shownote", self._generate_shownote, skip)
+            elif self.progress and self._episode_id:
+                self.progress.mark_step_skipped(self._episode_id, "shownote")
 
         except Exception as e:
             ctx.errors.append(f"Pipeline 异常: {e}")
@@ -215,6 +238,8 @@ class Pipeline:
                 print(f"     - {err}")
         if ctx.final_audio_path:
             print(f"  📁 最终音频: {ctx.final_audio_path}")
+        if ctx.shownote_path:
+            print(f"  📝 Shownote: {ctx.shownote_path}")
         print("=" * 65)
 
         return ctx
@@ -300,6 +325,8 @@ class Pipeline:
             }
         elif step_name == "tts":
             return {"final_audio_path": ctx.final_audio_path}
+        elif step_name == "shownote":
+            return {"shownote_path": ctx.shownote_path}
         return {}
 
     def _restore_context(self, ctx: 'PipelineContext', completed_steps: dict) -> None:
@@ -376,6 +403,9 @@ class Pipeline:
             elif step == "tts":
                 ctx.final_audio_path = data.get("final_audio_path", "")
 
+            elif step == "shownote":
+                ctx.shownote_path = data.get("shownote_path", "")
+
     def _invalidate_from(self, step_name: str, completed_steps: dict) -> None:
         """文件缺失时，将该步骤及后续步骤从已完成集合中移除。"""
         found = False
@@ -411,6 +441,52 @@ class Pipeline:
         with open(txt_path, "r", encoding="utf-8") as f:
             text = f.read()
         return TranscriptResult(full_text=text)
+
+    # ============================================================
+    # 人工确认暂停
+    # ============================================================
+
+    @staticmethod
+    def _human_review_pause(ctx: 'PipelineContext'):
+        """翻译完成后暂停，让用户检查翻译质量再继续。"""
+        if not ctx.translation:
+            return
+
+        print()
+        print("=" * 65)
+        print("  ✋ 翻译已完成，请检查译文质量")
+        print("=" * 65)
+
+        # 显示翻译摘要
+        text = ctx.translation.translated_text
+        char_count = len(text)
+        seg_count = len(ctx.speaker_translations) if ctx.speaker_translations else 0
+        print(f"  总字数: {char_count}")
+        if seg_count:
+            print(f"  段落数: {seg_count}")
+        if ctx.translation_path:
+            print(f"  译文文件: {ctx.translation_path}")
+
+        # 显示前几段样例
+        if ctx.speaker_translations:
+            print(f"\n  译文样例（前 3 段）:")
+            for item in ctx.speaker_translations[:3]:
+                speaker = item.get("speaker", "")
+                translated = item.get("translated", "")[:80]
+                print(f"    [{speaker}] {translated}...")
+        elif text:
+            print(f"\n  译文样例:")
+            preview = text[:200]
+            print(f"    {preview}...")
+
+        print()
+        choice = input("  按回车继续 TTS 合成和 Shownote 生成，或输入 q 退出: ").strip().lower()
+        if choice == "q":
+            print("  👋 已退出，可重新运行从此处继续（断点续跑）")
+            import sys
+            sys.exit(0)
+
+        print()
 
     # ============================================================
     # 各步骤实现
@@ -911,7 +987,15 @@ class Pipeline:
                         print(f"{'='*60}\n")
 
                     segment = PydubSegment.from_file(temp_path)
+                    chinese_start = len(combined) / 1000
                     combined += segment
+                    chinese_end = len(combined) / 1000
+                    ctx.tts_segment_durations.append({
+                        "original_start": start_sec,
+                        "original_end": end_sec,
+                        "chinese_start": chinese_start,
+                        "chinese_end": chinese_end,
+                    })
                 except Exception as e:
                     # 单段合成失败，记录警告但不中断整个流程
                     warning_info = (i, ts_str, text, str(e))
@@ -1039,3 +1123,114 @@ class Pipeline:
         # 统计标注结果
         labeled_count = sum(1 for seg in ctx.transcript.segments if seg.speaker)
         print(f"  🏷️  已为 {labeled_count}/{len(ctx.transcript.segments)} 个片段标注说话人")
+
+    # ============================================================
+    # Step 6: Shownote 生成
+    # ============================================================
+
+    def _generate_shownote(self, ctx: PipelineContext, skip: set):
+        import re as _re
+        from core.shownote_generator import (
+            generate_shownote, extract_shownote_from_entry,
+            adjust_timeline, ShownoteResult,
+        )
+
+        # 1. 从 RSS entry 提取原始 shownote（如果有）
+        original_shownote = None
+        if ctx.rss_entry:
+            try:
+                original_shownote = extract_shownote_from_entry(ctx.rss_entry)
+                if original_shownote.get("description"):
+                    print(f"  📰 已提取原始 Shownote ({len(original_shownote['description'])} 字)")
+            except Exception as e:
+                print(f"  ⚠️ 提取原始 Shownote 失败: {e}")
+
+        # 2. 构建时间调整后的 transcript
+        adjusted_transcript = self._build_adjusted_transcript(ctx)
+
+        # 3. 调用 LLM 生成 shownote
+        translation_text = ctx.translation.translated_text if ctx.translation else ""
+        ctx.shownote = generate_shownote(
+            llm=self.shownote_llm,
+            transcript=adjusted_transcript,
+            translation_text=translation_text,
+            original_shownote=original_shownote,
+            podcast_name=ctx.podcast_name,
+            episode_title=ctx.episode_title,
+        )
+
+        # 4. 二次校正：用实际 TTS 段落时长微调 LLM 输出的时间线
+        if ctx.tts_segment_durations:
+            adjust_timeline(ctx.shownote, ctx.tts_segment_durations)
+
+        # 5. 重新生成 full_text（时间线可能已调整）
+        ctx.shownote.full_text = ctx.shownote.to_plain_text()
+
+        # 6. 保存文件
+        os.makedirs(self.shownote_dir, exist_ok=True)
+        safe_name = ctx.episode_title[:50] or "shownote"
+        safe_name = _re.sub(r'[^\w\-]', '_', safe_name)
+
+        md_path = os.path.join(self.shownote_dir, f"{safe_name}_shownote.md")
+        txt_path = os.path.join(self.shownote_dir, f"{safe_name}_shownote.txt")
+
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(ctx.shownote.to_markdown())
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(ctx.shownote.to_plain_text())
+
+        ctx.shownote_path = md_path
+        print(f"  💾 Shownote (Markdown): {md_path}")
+        print(f"  💾 Shownote (纯文本): {txt_path}")
+
+    def _build_adjusted_transcript(self, ctx: PipelineContext) -> TranscriptResult:
+        """构建时间戳已调整为中文音频的 transcript（供 shownote LLM 使用）。"""
+        if not ctx.transcript or not ctx.transcript.segments:
+            return ctx.transcript or TranscriptResult()
+
+        # 确定缩放策略
+        segment_map = ctx.tts_segment_durations  # 多说话人模式
+        scale = None
+
+        if not segment_map:
+            # 单说话人或 skip-tts fallback：用整体比例估算
+            english_duration = ctx.transcript.duration
+            chinese_duration = 0
+            if ctx.tts_result and ctx.tts_result.duration:
+                chinese_duration = ctx.tts_result.duration
+            elif english_duration > 0:
+                # 无 TTS 结果时用 speech_rate 估算
+                speech_rate = self.config.get("cosyvoice", {}).get("speech_rate", 1.0)
+                chinese_duration = english_duration / speech_rate
+
+            if english_duration > 0 and chinese_duration > 0:
+                scale = chinese_duration / english_duration
+
+        # 构建调整后的 segments
+        adjusted_segments = []
+        for seg in ctx.transcript.segments:
+            if segment_map:
+                # 多说话人：用段落映射精确转换
+                from core.shownote_generator import _map_timestamp
+                new_start = _map_timestamp(seg.start, segment_map)
+                new_end = _map_timestamp(seg.end, segment_map)
+            elif scale is not None:
+                new_start = seg.start * scale
+                new_end = seg.end * scale
+            else:
+                new_start = seg.start
+                new_end = seg.end
+
+            adjusted_segments.append(TranscriptSegment(
+                start=new_start,
+                end=new_end,
+                text=seg.text,
+                speaker=seg.speaker,
+            ))
+
+        return TranscriptResult(
+            segments=adjusted_segments,
+            full_text=ctx.transcript.full_text,
+            language=ctx.transcript.language,
+            duration=ctx.tts_result.duration if ctx.tts_result else ctx.transcript.duration,
+        )

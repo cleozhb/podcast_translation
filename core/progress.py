@@ -24,7 +24,7 @@ class ProgressTracker:
         tracker.close()
     """
 
-    STEPS = ["download", "voiceprint", "stt", "translate", "tts"]
+    STEPS = ["download", "voiceprint", "stt", "translate", "tts", "shownote"]
 
     def __init__(self, db_path: str = "./data/progress.db"):
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
