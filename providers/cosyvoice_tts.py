@@ -41,6 +41,22 @@ try:
 except Exception as e:
     print(f"  ⚠️ websocket SSL patch 失败 (可忽略): {e}")
 
+# Patch aiohttp 的 SSL 上下文（DashScope Recognition API 使用 aiohttp）
+try:
+    import aiohttp
+    _ssl_ctx = ssl.create_default_context(cafile=_CA_BUNDLE)
+    _orig_tcp_connector_init = aiohttp.TCPConnector.__init__
+
+    def _patched_tcp_connector_init(self, *args, **kwargs):
+        if "ssl" not in kwargs or kwargs["ssl"] is None:
+            kwargs["ssl"] = _ssl_ctx
+        _orig_tcp_connector_init(self, *args, **kwargs)
+
+    aiohttp.TCPConnector.__init__ = _patched_tcp_connector_init
+    print("  🔧 已 patch aiohttp SSL 证书配置")
+except Exception as e:
+    print(f"  ⚠️ aiohttp SSL patch 失败 (可忽略): {e}")
+
 
 import dashscope
 from dashscope.audio.tts_v2 import SpeechSynthesizer, VoiceEnrollmentService
@@ -449,6 +465,12 @@ class CosyVoiceTTS(TTSProvider):
         try:
             recognized = self._quick_stt(audio_path)
             if not recognized:
+                # STT 可能间歇性返回空结果，重试一次
+                import time
+                print(f"     [STT] 首次识别为空，等待 1s 后重试...")
+                time.sleep(1)
+                recognized = self._quick_stt(audio_path)
+            if not recognized:
                 return False, 0.0, "STT 未识别出任何文字"
 
             score = self._text_similarity(original_text, recognized)
@@ -463,22 +485,32 @@ class CosyVoiceTTS(TTSProvider):
 
     def _quick_stt(self, audio_path: str) -> str:
         """
-        快速 STT：用 DashScope Recognition 同步识别合成音频。
+        快速 STT：用 DashScope Transcription 离线识别合成音频。
         只取文本，不需要时间戳。
-
-        Recognition 要求 wav 16kHz 输入，所以先用 pydub 转格式。
         """
-        from dashscope.audio.asr import Recognition, RecognitionCallback
+        import dashscope
+        from dashscope.audio.asr import Transcription
         from pydub import AudioSegment
         import tempfile
         import os
+        import json
+        import time
 
-        # 转为 wav 16kHz 单声道（Recognition 对 mp3 22050Hz 不稳定）
+        # 转为 wav 16kHz 单声道
         audio = AudioSegment.from_file(audio_path)
         audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
         wav_path = tempfile.mktemp(suffix=".wav")
         try:
             audio.export(wav_path, format="wav")
+            file_size = os.path.getsize(wav_path)
+            duration_sec = len(audio) / 1000.0
+            print(f"     [STT debug] WAV: {file_size} bytes, {duration_sec:.1f}s")
+
+            # 使用 file_urls 方式提交离线转录任务
+            # Transcription 需要可访问的 URL，本地文件需要用 file:// 协议
+            # 但 DashScope Transcription 只支持 http/https/oss URL
+            # 所以改用 Recognition（实时识别）但加上详细错误日志
+            from dashscope.audio.asr import Recognition, RecognitionCallback
 
             callback = RecognitionCallback()
             recognition = Recognition(
@@ -489,10 +521,28 @@ class CosyVoiceTTS(TTSProvider):
             )
             result = recognition.call(wav_path)
 
+            print(f"     [STT debug] status_code={result.status_code}, "
+                  f"message={getattr(result, 'message', 'N/A')}")
+
             if result.status_code == 200:
                 sentences = result.get_sentence()
+                print(f"     [STT debug] sentences count: {len(sentences) if sentences else 0}")
                 if sentences:
-                    return "".join(s.get("text", "") for s in sentences)
+                    text = "".join(s.get("text", "") for s in sentences)
+                    print(f"     [STT debug] recognized: {text[:80]}...")
+                    return text
+                else:
+                    # 尝试从 output 中获取
+                    output = getattr(result, 'output', None)
+                    print(f"     [STT debug] no sentences, output={output}")
+            else:
+                print(f"     [STT debug] API 错误: code={result.status_code}, "
+                      f"message={getattr(result, 'message', 'N/A')}")
+                # 打印完整结果帮助调试
+                try:
+                    print(f"     [STT debug] full result: {result}")
+                except Exception:
+                    pass
             return ""
         finally:
             if os.path.exists(wav_path):
