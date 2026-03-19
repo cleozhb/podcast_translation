@@ -910,7 +910,7 @@ class Pipeline:
             role = "主持人" if any(
                 vp.speaker == spk and vp.is_host for vp in ctx.voiceprints
             ) else "嘉宾"
-            print(f"     {spk} [{role}]: {url[:60]}...")
+            print(f"     {spk} [{role}]: {url[:]}...")
 
         # 预创建所有说话人的音色（避免重复创建）
         try:

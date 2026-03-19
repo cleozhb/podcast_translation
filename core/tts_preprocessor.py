@@ -132,6 +132,12 @@ def clean_punctuation(text: str) -> str:
     # 中文分号 → 逗号
     text = text.replace('；', '，')
 
+    # 中文括号 → 逗号（括号结构容易导致 TTS 模型混乱）
+    text = text.replace('（', '，')
+    text = text.replace('）', '，')
+    text = text.replace('(', '，')
+    text = text.replace(')', '，')
+
     # 连续标点去重
     text = re.sub(r'[，,]{2,}', '，', text)
     text = re.sub(r'[。.]{2,}', '。', text)
@@ -182,11 +188,7 @@ def process_english_words(text: str, word_map: dict = None) -> str:
         if re.match(r'^[A-Z]{2,5}$', word):
             return ' '.join(word)
 
-        # 其他英文词保留（但如果太长可能需要拼读）
-        if len(word) > 10:
-            # 超长英文单词可能让 TTS 崩溃，拆开
-            return ' '.join(word)
-
+        # 其他英文词保留原样（CosyVoice 对正常英文单词处理较好）
         return word
 
     # 匹配英文单词（包含字母和常见连字符）
@@ -216,6 +218,67 @@ def process_numbers(text: str) -> str:
     text = re.sub(r'(\d+)\s*个', r'\1个', text)  # 保持原样
 
     return text
+
+
+# ============================================================
+# 合并过短句子
+# ============================================================
+
+def merge_short_sentences(text: str, min_chars: int = 10) -> str:
+    """
+    合并连续短句，避免 TTS 模型因上下文太短而语言跑偏。
+
+    连续的短句（< min_chars 个字）会被用逗号连接成一个较长句子，
+    给 TTS 模型更多上下文来判断语言和语调。
+    """
+    # 按句末标点拆分，保留标点
+    parts = re.split(r'([。！？!?])', text)
+
+    # 重组为 (句子, 标点) 对
+    sentences = []
+    for i in range(0, len(parts), 2):
+        sent = parts[i]
+        punct = parts[i + 1] if i + 1 < len(parts) else ""
+        if sent or punct:
+            sentences.append((sent, punct))
+
+    if not sentences:
+        return text
+
+    result = []
+    buffer = ""  # 累积短句
+
+    for sent, punct in sentences:
+        # 计算纯文字长度（去掉空格和标点）
+        text_len = len(re.sub(r'[\s，,。！？!?\.\u2026]', '', sent))
+
+        if text_len < min_chars:
+            # 短句，累积到 buffer
+            if buffer:
+                buffer += "，" + sent
+            else:
+                buffer = sent
+        else:
+            # 长句，先输出 buffer 中的短句
+            if buffer:
+                # buffer 里都是短句，和当前长句合并
+                result.append(buffer + "，" + sent + punct)
+                buffer = ""
+            else:
+                result.append(sent + punct)
+
+    # 处理剩余的 buffer
+    if buffer:
+        if result:
+            # 把剩余短句附加到最后一个结果
+            last = result[-1]
+            # 去掉末尾标点，加逗号连接
+            last = re.sub(r'[。！？!?]$', '', last)
+            result[-1] = last + "，" + buffer + "。"
+        else:
+            result.append(buffer + "。")
+
+    return ''.join(result)
 
 
 # ============================================================
@@ -316,6 +379,9 @@ def preprocess_for_tts(text: str, config: PreprocessConfig = None) -> str:
     if config.clean_punct:
         text = clean_punctuation(text)
 
+    # Step 3.5: 合并过短句子（在断长句之前，避免 TTS 因上下文太短跑偏）
+    text = merge_short_sentences(text)
+
     # Step 4: 长句断句
     if config.split_long:
         text = split_long_sentences(text, config.max_sentence_chars)
@@ -324,7 +390,7 @@ def preprocess_for_tts(text: str, config: PreprocessConfig = None) -> str:
     # 去掉多余空格
     text = re.sub(r' {2,}', ' ', text)
     # 去掉行首行尾空格
-    text = '\n'.join(line.strip() for line in text.split('\n'))
+    # text = '\n'.join(line.strip() for line in text.split('\n'))
 
     return text
 
@@ -383,12 +449,22 @@ def show_diff(original: str, processed: str):
 
 
 if __name__ == "__main__":
-    # 测试用例：你反馈的四句问题文本
+    # 测试用例：覆盖各类乱码场景
     test_cases = [
+        # 原有测试：破折号、引号、长句
         '我想先抛出一个有点"劲爆"的问题——大概六个月前，不知道大家还记得不记得？你先是离开了Anthropic，加入了Cursor，结果两周后又回了Anthropic。',
         '报告里的原话是："就在我们一眨眼的工夫，AI 已经接管了整个软件开发。"',
         '越来越多经验最丰富、资历最深的工程师——包括你本人——都在公开分享一个事实：自己已经不再写代码了，所有代码都是 AI 生成的。',
         '我们走到这一步，很大程度上，就得益于你当初启动的这个小项目，以及你和团队在过去一年里把它一步步做大的努力。所以我很想听听，你对过去这一年，还有你所做的工作所带来的这些影响，有什么样的思考和感受？',
+        # 新增：括号处理
+        '太爱了！Gerard K. O\'Neill 的愿景正在变成现实。今年在丰盛峰会（Abundance Summit）现场',
+        # 新增：连续短句合并
+        '我看见你了。希望。希望。对，就是这个味儿!你这是把希望给商业化了',
+        # 新增：破折号+长英文单词
+        '好吧，接下来这句话听起来可能有点疯狂——不过没关系',
+        '嗯……它之所以叫奇点（singularity），是因为在那个时刻之后，一切都变得不可预测。',
+        # 新增：验证 singularity 不被拆成字母
+        '这就是所谓的technological singularity，也就是技术奇点。',
     ]
 
     config = PreprocessConfig()

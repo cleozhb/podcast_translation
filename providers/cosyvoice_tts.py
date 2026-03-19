@@ -95,10 +95,13 @@ class CosyVoiceTTS(TTSProvider):
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
-                print(f"     🔄 第 {attempt}/{max_attempts} 次重试合成...")
+                print(f"     🔄 第 {attempt}/{max_attempts} 次重试合成（渐进清洗 level {attempt - 1}）...")
+
+            # 渐进式清洗：第 1 次用原文，之后每次更激进
+            current_text = self._progressively_clean(text, attempt - 1) if attempt > 1 else text
 
             try:
-                result = self._synthesize_once(text, output_path, voice_url)
+                result = self._synthesize_once(current_text, output_path, voice_url)
                 last_result = result
             except Exception as e:
                 last_error = e
@@ -413,6 +416,29 @@ class CosyVoiceTTS(TTSProvider):
 
         return chunks if chunks else [text]
         
+    def _progressively_clean(self, text: str, level: int) -> str:
+        """
+        渐进式文本清洗，每次重试时更激进地简化文本。
+
+        level 1: 移除所有英文字符和数字，只保留中文和基本标点
+        level 2: 最激进 — 只保留中文字符和逗号句号
+        """
+        import re
+        if level >= 1:
+            # 移除所有英文字符和数字
+            text = re.sub(r'[A-Za-z0-9]+', '', text)
+            # 只保留中文、逗号、句号、问号、感叹号
+            text = re.sub(r'[^\u4e00-\u9fff，。？！?!,.\s]', '', text)
+        if level >= 2:
+            # 最激进：只保留中文和逗号句号
+            text = re.sub(r'[^\u4e00-\u9fff，。]', '', text)
+        # 清理连续标点和空白
+        text = re.sub(r'[，,]{2,}', '，', text)
+        text = re.sub(r'\s+', '', text)
+        # 去掉句首标点
+        text = re.sub(r'^[，,]', '', text)
+        return text
+
     def _verify_quality(self, original_text: str, audio_path: str) -> tuple[bool, float, str]:
         """
         STT 反向验证：把合成音频识别回文字，与原文做相似度比较。
