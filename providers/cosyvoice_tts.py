@@ -208,8 +208,11 @@ class CosyVoiceTTS(TTSProvider):
             if self.volume != 50:
                 params["volume"] = self.volume
             
+            # 语言提示：强制中文，防止英文声纹导致的跨语言音素泄漏
+            params["language_hints"] = ["zh"]
+
             print(f"     语速：{self.speech_rate}x, 音调：{self.pitch_rate}x, 音量：{self.volume}")
-            
+
             synthesizer = SpeechSynthesizer(**params)
             
             # 非流式调用：call() 方法直接返回完整的二进制音频数据 (bytes)
@@ -283,11 +286,12 @@ class CosyVoiceTTS(TTSProvider):
                 import random
                 prefix = f"voice{random.randint(1000, 9999)}"
             
-            # Step 1: 创建音色
+            # Step 1: 创建音色（指定目标语言为中文，减少英文声纹的语言污染）
             voice_id = service.create_voice(
                 target_model=self.model,
                 prefix=prefix,
-                url=audio_url
+                url=audio_url,
+                language_hints=["zh"],
             )
             
             print(f"  ✅ 音色创建成功!")
