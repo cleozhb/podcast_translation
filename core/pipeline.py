@@ -1145,23 +1145,37 @@ class Pipeline:
             except Exception as e:
                 print(f"  ⚠️ 提取原始 Shownote 失败: {e}")
 
-        # 2. 构建时间调整后的 transcript
-        adjusted_transcript = self._build_adjusted_transcript(ctx)
-
-        # 3. 调用 LLM 生成 shownote
+        # 2. 调用 LLM 生成 shownote（时间戳使用英文原版时间）
         translation_text = ctx.translation.translated_text if ctx.translation else ""
         ctx.shownote = generate_shownote(
             llm=self.shownote_llm,
-            transcript=adjusted_transcript,
+            transcript=ctx.transcript,
             translation_text=translation_text,
             original_shownote=original_shownote,
             podcast_name=ctx.podcast_name,
             episode_title=ctx.episode_title,
         )
 
-        # 4. 二次校正：用实际 TTS 段落时长微调 LLM 输出的时间线
-        if ctx.tts_segment_durations:
-            adjust_timeline(ctx.shownote, ctx.tts_segment_durations)
+        # 3. 将英文时间线映射到中文音频时间
+        segment_map = ctx.tts_segment_durations
+        if not segment_map and ctx.transcript and ctx.transcript.duration > 0:
+            # 单说话人或 skip-tts fallback：用整体时长比例合成单段映射
+            english_duration = ctx.transcript.duration
+            chinese_duration = 0
+            if ctx.tts_result and ctx.tts_result.duration:
+                chinese_duration = ctx.tts_result.duration
+            else:
+                speech_rate = self.config.get("cosyvoice", {}).get("speech_rate", 1.0)
+                chinese_duration = english_duration / speech_rate
+            if chinese_duration > 0:
+                segment_map = [{
+                    "original_start": 0.0,
+                    "original_end": english_duration,
+                    "chinese_start": 0.0,
+                    "chinese_end": chinese_duration,
+                }]
+        if segment_map:
+            adjust_timeline(ctx.shownote, segment_map)
 
         # 5. 重新生成 full_text（时间线可能已调整）
         ctx.shownote.full_text = ctx.shownote.to_plain_text()
@@ -1183,54 +1197,3 @@ class Pipeline:
         print(f"  💾 Shownote (Markdown): {md_path}")
         print(f"  💾 Shownote (纯文本): {txt_path}")
 
-    def _build_adjusted_transcript(self, ctx: PipelineContext) -> TranscriptResult:
-        """构建时间戳已调整为中文音频的 transcript（供 shownote LLM 使用）。"""
-        if not ctx.transcript or not ctx.transcript.segments:
-            return ctx.transcript or TranscriptResult()
-
-        # 确定缩放策略
-        segment_map = ctx.tts_segment_durations  # 多说话人模式
-        scale = None
-
-        if not segment_map:
-            # 单说话人或 skip-tts fallback：用整体比例估算
-            english_duration = ctx.transcript.duration
-            chinese_duration = 0
-            if ctx.tts_result and ctx.tts_result.duration:
-                chinese_duration = ctx.tts_result.duration
-            elif english_duration > 0:
-                # 无 TTS 结果时用 speech_rate 估算
-                speech_rate = self.config.get("cosyvoice", {}).get("speech_rate", 1.0)
-                chinese_duration = english_duration / speech_rate
-
-            if english_duration > 0 and chinese_duration > 0:
-                scale = chinese_duration / english_duration
-
-        # 构建调整后的 segments
-        adjusted_segments = []
-        for seg in ctx.transcript.segments:
-            if segment_map:
-                # 多说话人：用段落映射精确转换
-                from core.shownote_generator import _map_timestamp
-                new_start = _map_timestamp(seg.start, segment_map)
-                new_end = _map_timestamp(seg.end, segment_map)
-            elif scale is not None:
-                new_start = seg.start * scale
-                new_end = seg.end * scale
-            else:
-                new_start = seg.start
-                new_end = seg.end
-
-            adjusted_segments.append(TranscriptSegment(
-                start=new_start,
-                end=new_end,
-                text=seg.text,
-                speaker=seg.speaker,
-            ))
-
-        return TranscriptResult(
-            segments=adjusted_segments,
-            full_text=ctx.transcript.full_text,
-            language=ctx.transcript.language,
-            duration=ctx.tts_result.duration if ctx.tts_result else ctx.transcript.duration,
-        )
