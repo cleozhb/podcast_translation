@@ -324,7 +324,11 @@ class Pipeline:
                 "speaker_translations": ctx.speaker_translations,
             }
         elif step_name == "tts":
-            return {"final_audio_path": ctx.final_audio_path}
+            return {
+                "final_audio_path": ctx.final_audio_path,
+                "tts_segment_durations": ctx.tts_segment_durations,
+                "tts_duration": ctx.tts_result.duration if ctx.tts_result else 0.0,
+            }
         elif step_name == "shownote":
             return {"shownote_path": ctx.shownote_path}
         return {}
@@ -401,10 +405,35 @@ class Pipeline:
                     return
 
             elif step == "tts":
-                ctx.final_audio_path = data.get("final_audio_path", "")
+                path = data.get("final_audio_path", "")
+                if path and os.path.exists(path):
+                    ctx.final_audio_path = path
+                    ctx.tts_segment_durations = data.get("tts_segment_durations", []) or []
+                    tts_dur = data.get("tts_duration", 0.0) or 0.0
+                    if tts_dur <= 0:
+                        # 旧进度库没存 duration，从音频文件现场读取
+                        try:
+                            from core.audio_utils import get_audio_duration
+                            tts_dur = get_audio_duration(path)
+                        except Exception:
+                            tts_dur = 0.0
+                    if tts_dur > 0:
+                        from providers.base import TTSResult
+                        ctx.tts_result = TTSResult(
+                            audio_path=path,
+                            duration=tts_dur,
+                        )
+                else:
+                    self._invalidate_from(step, completed_steps)
+                    return
 
             elif step == "shownote":
-                ctx.shownote_path = data.get("shownote_path", "")
+                path = data.get("shownote_path", "")
+                if path and os.path.exists(path):
+                    ctx.shownote_path = path
+                else:
+                    self._invalidate_from(step, completed_steps)
+                    return
 
     def _invalidate_from(self, step_name: str, completed_steps: dict) -> None:
         """文件缺失时，将该步骤及后续步骤从已完成集合中移除。"""
@@ -1158,22 +1187,33 @@ class Pipeline:
 
         # 3. 将英文时间线映射到中文音频时间
         segment_map = ctx.tts_segment_durations
-        if not segment_map and ctx.transcript and ctx.transcript.duration > 0:
-            # 单说话人或 skip-tts fallback：用整体时长比例合成单段映射
-            english_duration = ctx.transcript.duration
-            chinese_duration = 0
+        if not segment_map and ctx.transcript:
+            # 单说话人 / skip-tts / 旧记录 fallback：用整体时长比例合成单段映射
+            english_duration = ctx.transcript.duration or 0.0
+            if english_duration <= 0 and ctx.transcript.segments:
+                english_duration = ctx.transcript.segments[-1].end
+            chinese_duration = 0.0
             if ctx.tts_result and ctx.tts_result.duration:
                 chinese_duration = ctx.tts_result.duration
-            else:
+            elif ctx.final_audio_path and os.path.exists(ctx.final_audio_path):
+                try:
+                    from core.audio_utils import get_audio_duration
+                    chinese_duration = get_audio_duration(ctx.final_audio_path)
+                except Exception:
+                    chinese_duration = 0.0
+            if chinese_duration <= 0 and english_duration > 0:
                 speech_rate = self.config.get("cosyvoice", {}).get("speech_rate", 1.0)
                 chinese_duration = english_duration / speech_rate
-            if chinese_duration > 0:
+            if english_duration > 0 and chinese_duration > 0:
                 segment_map = [{
                     "original_start": 0.0,
                     "original_end": english_duration,
                     "chinese_start": 0.0,
                     "chinese_end": chinese_duration,
                 }]
+                print(f"  ⏱️  无分段映射，使用整体时长比例: "
+                      f"{english_duration:.0f}s → {chinese_duration:.0f}s "
+                      f"(scale={chinese_duration/english_duration:.3f})")
         if segment_map:
             adjust_timeline(ctx.shownote, segment_map)
 
