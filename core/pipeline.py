@@ -8,7 +8,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from providers.base import (
     STTProvider, LLMProvider, TTSProvider, StorageProvider,
@@ -87,6 +87,8 @@ class Pipeline:
         storage: Optional[StorageProvider] = None,
         progress: Optional[ProgressTracker] = None,
         shownote_llm: Optional[LLMProvider] = None,
+        interactive_review: bool = True,
+        status_callback: Optional[Callable] = None,
     ):
         self.config = config
         self.stt = stt
@@ -95,6 +97,10 @@ class Pipeline:
         self.storage = storage
         self.progress = progress
         self.shownote_llm = shownote_llm or llm  # shownote 专用 LLM，默认复用翻译 LLM
+        self.interactive_review = interactive_review
+        self.status_callback = status_callback
+        self._progress_ranges: dict[str, tuple[float, float]] = {}
+        self._last_progress = 0.0
 
         # 输出目录
         out = config.get("output", {})
@@ -152,6 +158,7 @@ class Pipeline:
             PipelineContext 包含所有中间结果
         """
         skip = set(skip_steps or [])
+        self._progress_ranges = self._build_progress_ranges(skip)
         ctx = PipelineContext(
             podcast_name=podcast_name,
             episode_title=episode_title,
@@ -181,6 +188,7 @@ class Pipeline:
         print(f"  节目: {episode_title}")
         print(f"  Provider: STT={self.stt.name()} | LLM={self.llm.name()} | TTS={self.tts.name()}")
         print("=" * 65)
+        self._emit_status("queued", self._progress_for("download", "start"), "Pipeline starting.")
 
         try:
             # Step 1: 下载音频
@@ -199,7 +207,7 @@ class Pipeline:
             self._run_step(ctx, "translate", self._translate, skip)
 
             # 人工确认暂停（翻译完成后，TTS/shownote 之前）
-            if "tts" not in skip or "shownote" not in skip:
+            if self.interactive_review and ("tts" not in skip or "shownote" not in skip):
                 self._human_review_pause(ctx)
 
             # Step 5: TTS 合成
@@ -215,15 +223,24 @@ class Pipeline:
                 self.progress.mark_step_skipped(self._episode_id, "shownote")
 
         except Exception as e:
+            if type(e).__name__ == "TranslationCancelled":
+                raise
             ctx.errors.append(f"Pipeline 异常: {e}")
             print(f"\n  ❌ 工作流异常: {e}")
             import traceback
             traceback.print_exc()
             if self.progress and self._episode_id:
                 self.progress.mark_episode_failed(self._episode_id, str(e))
+            self._emit_status(
+                "failed",
+                self._last_progress,
+                f"Pipeline failed: {e}",
+                self._artifacts_from_context(ctx),
+            )
         else:
             if self.progress and self._episode_id:
                 self.progress.mark_episode_completed(self._episode_id)
+            self._emit_status("done", 1.0, "Translation completed.", self._artifacts_from_context(ctx))
 
         # 总结
         total = time.time() - ctx.start_time
@@ -251,16 +268,26 @@ class Pipeline:
             print(f"\n{'─' * 50}")
             print(f"  ⏭️  Step: {name} (已完成，跳过)")
             print(f"{'─' * 50}")
+            self._emit_status(
+                name,
+                self._progress_for(name, "end"),
+                f"Step {name} already completed.",
+                self._artifacts_from_context(ctx),
+            )
             return
 
         print(f"\n{'─' * 50}")
         print(f"  📌 Step: {name}")
         print(f"{'─' * 50}")
+        self._emit_status(name, self._progress_for(name, "start"), f"Running step: {name}.")
         t0 = time.time()
         try:
             func(ctx, skip)
         except Exception as e:
+            if type(e).__name__ == "TranslationCancelled":
+                raise
             ctx.errors.append(f"[{name}] {e}")
+            self._emit_status(name, self._progress_for(name, "start"), f"Step {name} failed: {e}")
             if self.progress and self._episode_id:
                 self.progress.mark_step_failed(self._episode_id, name, str(e))
             raise
@@ -271,6 +298,69 @@ class Pipeline:
         if self.progress and self._episode_id:
             result_data = self._extract_step_result(ctx, name)
             self.progress.mark_step_completed(self._episode_id, name, result_data)
+        self._emit_status(
+            name,
+            self._progress_for(name, "end"),
+            f"Step {name} completed.",
+            self._artifacts_from_context(ctx),
+        )
+
+    def _emit_status(
+        self,
+        stage: str,
+        progress: float,
+        message: str,
+        artifacts: dict | None = None,
+    ) -> None:
+        if not self.status_callback:
+            return
+        self._last_progress = max(0.0, min(1.0, progress))
+        self.status_callback(
+            stage=stage,
+            progress=self._last_progress,
+            message=message,
+            artifacts=artifacts or {},
+        )
+
+    @staticmethod
+    def _build_progress_ranges(skip: set[str]) -> dict[str, tuple[float, float]]:
+        weights = {
+            "download": 15.4,
+            "voiceprint": 1635.6,
+            "stt": 173.4,
+            "translate": 664.4,
+            "tts": 3433.8,
+            "shownote": 21.5,
+        }
+        order = ["download", "voiceprint", "stt", "translate", "tts", "shownote"]
+        active = [step for step in order if step not in skip]
+        total = sum(weights[step] for step in active) or 1.0
+        current = 0.0
+        ranges = {}
+        for step in active:
+            start = current
+            current += weights[step] / total
+            ranges[step] = (start, current)
+        return ranges
+
+    def _progress_for(self, step: str, point: str) -> float:
+        start, end = self._progress_ranges.get(step, (0.0, 0.0))
+        return end if point == "end" else start
+
+    @staticmethod
+    def _artifacts_from_context(ctx: PipelineContext) -> dict:
+        artifacts = {}
+        if ctx.local_audio_path:
+            artifacts["source_audio"] = ctx.local_audio_path
+        if ctx.transcript_path:
+            artifacts["transcript_en"] = ctx.transcript_path
+        if ctx.translation_path:
+            artifacts["transcript_zh"] = ctx.translation_path
+        if ctx.final_audio_path:
+            artifacts["audio_zh"] = ctx.final_audio_path
+        if ctx.shownote_path:
+            artifacts["shownotes_zh"] = ctx.shownote_path
+        return artifacts
 
     # ============================================================
     # 断点续跑：提取 / 恢复步骤结果
@@ -1236,4 +1326,3 @@ class Pipeline:
         ctx.shownote_path = md_path
         print(f"  💾 Shownote (Markdown): {md_path}")
         print(f"  💾 Shownote (纯文本): {txt_path}")
-

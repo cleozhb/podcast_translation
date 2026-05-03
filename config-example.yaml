@@ -129,6 +129,9 @@ output:
   translation_dir: "./output/translations"
   voiceprint_dir: "./output/voiceprints"
   final_dir: "./output/final"
+  shownote_dir: "./output/shownotes"
+  progress_db: "./data/progress.db"
+  tasks_dir: "./output/translation_tasks"
 
 # ---- RSS 获取 ----
 rss:
@@ -136,3 +139,8 @@ rss:
   max_episodes: 20                # 交互列表最多显示几期
   proxy: null                     # 代理，如 "http://127.0.0.1:7890"
 
+# ---- 非交互 podcast_tool / little_claw Skill ----
+podcast_tool:
+  estimated_minutes: 60
+  rss_shownote_max_chars: 4000
+  worker_poll_cancel_seconds: 5
