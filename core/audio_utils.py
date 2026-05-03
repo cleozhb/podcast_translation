@@ -12,6 +12,7 @@ core/audio_utils.py
 import os
 import re
 import json
+import time
 import requests
 from dataclasses import dataclass, field
 from pydub import AudioSegment, silence
@@ -96,6 +97,7 @@ def download_audio(url: str, output_dir: str, filename: str = None,
 
     total = int(resp.headers.get("content-length", 0))
     downloaded = 0
+    last_print_time = 0.0
     os.makedirs(output_dir, exist_ok=True)
 
     with open(filepath, "wb") as f:
@@ -103,8 +105,15 @@ def download_audio(url: str, output_dir: str, filename: str = None,
             f.write(chunk)
             downloaded += len(chunk)
             if total > 0:
-                pct = downloaded / total * 100
-                print(f"\r     进度: {pct:.1f}% ({downloaded // (1024*1024)}MB / {total // (1024*1024)}MB)", end="")
+                now = time.monotonic()
+                if now - last_print_time >= 0.5:
+                    pct = downloaded / total * 100
+                    print(f"\r     进度: {pct:.1f}% ({downloaded // (1024*1024)}MB / {total // (1024*1024)}MB)", end="")
+                    last_print_time = now
+
+    # 确保下载完成时打印 100%
+    if total > 0:
+        print(f"\r     进度: 100.0% ({total // (1024*1024)}MB / {total // (1024*1024)}MB)", end="")
 
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"\n  ✅ 下载完成: {filepath} ({size_mb:.1f}MB)")
