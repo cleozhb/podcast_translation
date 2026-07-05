@@ -83,6 +83,12 @@ class CosyVoiceTTS(TTSProvider):
         self.pitch_rate = cv.get("pitch_rate", 1.0)
         # 音量：0-100，默认 50
         self.volume = cv.get("volume", 50)
+        self.instructions = cv.get(
+            "instructions",
+            "用自然中文播客口吻朗读，只朗读正文，不朗读标签、符号和括号标记，句尾自然收束。",
+        )
+        self.synthesis_language_hints = cv.get("synthesis_language_hints", ["zh"])
+        self.enrollment_language_hints = cv.get("enrollment_language_hints", ["en"])
         # 声音克隆相关配置 - 移除了持久化的 voice_id 和 voiceprint_url
         # 每次都为不同的声纹创建新音色（多说话人场景）
 
@@ -208,12 +214,22 @@ class CosyVoiceTTS(TTSProvider):
             if self.volume != 50:
                 params["volume"] = self.volume
             
-            # 语言提示：强制中文，防止英文声纹导致的跨语言音素泄漏
-            params["language_hints"] = ["zh"]
+            # 语言提示：合成目标语言为中文，防止英文声纹导致跨语言音素泄漏
+            if self.synthesis_language_hints:
+                params["language_hints"] = self.synthesis_language_hints
+            if self.instructions:
+                params["instructions"] = self.instructions
 
             print(f"     语速：{self.speech_rate}x, 音调：{self.pitch_rate}x, 音量：{self.volume}")
 
-            synthesizer = SpeechSynthesizer(**params)
+            try:
+                synthesizer = SpeechSynthesizer(**params)
+            except TypeError as e:
+                if "instructions" not in params:
+                    raise
+                print(f"     ⚠️ 当前 DashScope SDK 不支持 instructions 参数，已自动降级: {e}")
+                params.pop("instructions", None)
+                synthesizer = SpeechSynthesizer(**params)
             
             # 非流式调用：call() 方法直接返回完整的二进制音频数据 (bytes)
             audio_data = synthesizer.call(text)
@@ -286,12 +302,12 @@ class CosyVoiceTTS(TTSProvider):
                 import random
                 prefix = f"voice{random.randint(1000, 9999)}"
             
-            # Step 1: 创建音色（指定目标语言为中文，减少英文声纹的语言污染）
+            # Step 1: 创建音色。这里提示的是声纹样本语言；英文播客默认 ["en"]。
             voice_id = service.create_voice(
                 target_model=self.model,
                 prefix=prefix,
                 url=audio_url,
-                language_hints=["zh"],
+                language_hints=self.enrollment_language_hints,
             )
             
             print(f"  ✅ 音色创建成功!")

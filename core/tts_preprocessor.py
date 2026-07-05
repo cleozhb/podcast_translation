@@ -100,6 +100,59 @@ ENGLISH_TO_CHINESE_READING = {
 # 标点清洗规则
 # ============================================================
 
+HIGH_RISK_TEXT_PATTERN = re.compile(
+    r'[\[【\]】<>{}（）()「」『』"“”‘’`*_#]|https?://|www\.|&[a-zA-Z]+;|[\u200b-\u200f\ufeff]'
+)
+
+
+def strip_speaker_labels(text: str) -> str:
+    """Remove routing labels from text that will be spoken by TTS."""
+    text = re.sub(
+        r'(?m)^\s*[\[【<（(]?\s*SPEAKER[_\-\s]*\d+\s*[\]】>）)]?\s*[:：]?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'(?m)(?<=\n)\s*[\[【<（(]?\s*SPEAKER[_\-\s]*\d+\s*[\]】>）)]?\s*[:：]?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def contains_high_risk_tts_chars(text: str) -> bool:
+    """Return whether text contains symbols that often destabilize TTS."""
+    return bool(HIGH_RISK_TEXT_PATTERN.search(text))
+
+
+def clean_markup_and_controls(text: str) -> str:
+    """Remove markup, URLs, invisible controls, emoji-like symbols, and TTS-hostile residues."""
+    # Drop invisible controls and most non-printing characters.
+    text = re.sub(r'[\u200b-\u200f\ufeff]', '', text)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+    # Replace URLs and email-ish residues with a pause; they are rarely useful in spoken output.
+    text = re.sub(r'https?://\S+|www\.\S+', '，', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b[\w.+-]+@[\w.-]+\.\w+\b', '，', text)
+
+    # Strip HTML/XML/Markdown-ish tags and entities.
+    text = re.sub(r'</?[^>\n]{1,80}>', '，', text)
+    text = re.sub(r'&(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);', '，', text)
+
+    # Remove markdown formatting markers that should never be spoken.
+    text = re.sub(r'[`*_#]+', '', text)
+
+    # Remove emoji and miscellaneous symbols outside normal CJK/Latin punctuation ranges.
+    text = re.sub(
+        r'[\U0001F000-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]',
+        '',
+        text,
+    )
+    return text
+
+
 def clean_punctuation(text: str) -> str:
     """
     清洗特殊标点，让 TTS 更容易处理。
@@ -143,6 +196,7 @@ def clean_punctuation(text: str) -> str:
     text = re.sub(r'[。.]{2,}', '。', text)
     text = re.sub(r'[?]{2,}', '?', text)
     text = re.sub(r'[!]{2,}', '!', text)
+    text = re.sub(r'[,，]\s*([。!?！？])', r'\1', text)
 
     # 句首标点清理（删除引号后可能出现句首逗号等）
     text = re.sub(r'(?:^|(?<=\n))[，,]\s*', '', text)
@@ -346,6 +400,14 @@ class PreprocessConfig:
     max_sentence_chars: int = 80
     # 是否处理数字
     process_nums: bool = True
+    # 是否剥离说话人标签（只影响朗读文本，不影响结构化 speaker 字段）
+    strip_speaker_labels: bool = True
+    # 是否清理 HTML/Markdown/URL/不可见字符等格式噪声
+    clean_markup: bool = True
+    # 高风险文本是否使用更短的断句阈值
+    conservative_for_risky: bool = True
+    # 高风险文本的断句阈值
+    risky_max_sentence_chars: int = 45
 
 
 def preprocess_for_tts(text: str, config: PreprocessConfig = None) -> str:
@@ -363,6 +425,13 @@ def preprocess_for_tts(text: str, config: PreprocessConfig = None) -> str:
         config = PreprocessConfig()
 
     original = text
+    high_risk = contains_high_risk_tts_chars(original)
+
+    # Step 0: 结构化路由标签、格式标记和不可见字符绝不能进入朗读正文
+    if config.strip_speaker_labels:
+        text = strip_speaker_labels(text)
+    if config.clean_markup:
+        text = clean_markup_and_controls(text)
 
     # Step 1: 数字处理
     if config.process_nums:
@@ -384,11 +453,17 @@ def preprocess_for_tts(text: str, config: PreprocessConfig = None) -> str:
 
     # Step 4: 长句断句
     if config.split_long:
-        text = split_long_sentences(text, config.max_sentence_chars)
+        max_chars = config.max_sentence_chars
+        if config.conservative_for_risky and high_risk:
+            max_chars = min(max_chars, config.risky_max_sentence_chars)
+        text = split_long_sentences(text, max_chars)
 
     # Step 5: 最终清理
     # 去掉多余空格
     text = re.sub(r' {2,}', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'^[，,。.!?！？\s]+', '', text)
+    text = re.sub(r'[，,]\s*$', '。', text.strip())
     # 去掉行首行尾空格
     # text = '\n'.join(line.strip() for line in text.split('\n'))
 

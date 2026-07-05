@@ -358,6 +358,7 @@ def extract_voiceprint(
     target_duration: float = 20.0,
     min_segment_duration: float = 5.0,
     target_sample_rate: int = 16000,
+    skip_initial_seconds: float = 90.0,
 ) -> list[VoiceprintInfo]:
     """
     智能声纹提取。
@@ -413,22 +414,27 @@ def extract_voiceprint(
         print(f"     {'🎙️ 主持人' if is_host else '🗣️ 嘉宾  '} {speaker}: "
               f"共 {len(segs)} 个片段，总时长 {total_dur:.1f}s")
 
-        # 策略1: 找最长的连续片段
-        best_seg = diarization.get_longest_continuous(speaker, min_segment_duration)
+        clip = AudioSegment.empty()
 
-        if best_seg and best_seg.duration >= target_duration:
-            # 单个片段就够了
-            clip = audio[best_seg.start * 1000 : best_seg.end * 1000]
-            # 截取目标时长（取中间部分，通常更干净）
-            if len(clip) / 1000 > target_duration:
-                mid = len(clip) // 2
-                half = int(target_duration * 1000 / 2)
-                clip = clip[mid - half : mid + half]
-            source_start = best_seg.start
-            source_end = best_seg.start + len(clip) / 1000
+        # 策略1: 从中段稳定对谈中选择评分最高的连续窗口
+        best_candidate = _select_voiceprint_candidate(
+            audio=audio,
+            segments=segs,
+            target_duration=target_duration,
+            min_segment_duration=min_segment_duration,
+            skip_initial_seconds=skip_initial_seconds,
+        )
+
+        if best_candidate:
+            source_start, source_end, score = best_candidate
+            clip = audio[int(source_start * 1000): int(source_end * 1000)]
+            print(f"     候选窗口评分: {score:.2f} ({source_start:.1f}s-{source_end:.1f}s)")
         else:
             # 策略2: 拼接多个较长片段
-            sorted_segs = sorted(segs, key=lambda s: -s.duration)
+            sorted_segs = sorted(
+                [s for s in segs if s.end > skip_initial_seconds],
+                key=lambda s: -s.duration,
+            ) or sorted(segs, key=lambda s: -s.duration)
             clip = AudioSegment.empty()
             source_start = sorted_segs[0].start if sorted_segs else 0
             source_end = source_start
@@ -436,9 +442,13 @@ def extract_voiceprint(
             for seg in sorted_segs:
                 if seg.duration < min_segment_duration:
                     continue
-                piece = audio[seg.start * 1000 : seg.end * 1000]
+                start = max(seg.start + 0.35, skip_initial_seconds)
+                end = seg.end - 0.35
+                if end <= start:
+                    continue
+                piece = audio[int(start * 1000): int(end * 1000)]
                 clip += piece
-                source_end = seg.end
+                source_end = end
                 if len(clip) / 1000 >= target_duration:
                     break
 
@@ -447,9 +457,13 @@ def extract_voiceprint(
                 for seg in sorted_segs:
                     if seg.duration < 2.0:
                         continue
-                    piece = audio[seg.start * 1000 : seg.end * 1000]
+                    start = max(seg.start + 0.2, skip_initial_seconds)
+                    end = seg.end - 0.2
+                    if end <= start:
+                        continue
+                    piece = audio[int(start * 1000): int(end * 1000)]
                     clip += piece
-                    source_end = seg.end
+                    source_end = end
                     if len(clip) / 1000 >= target_duration:
                         break
 
@@ -461,8 +475,9 @@ def extract_voiceprint(
         if len(clip) / 1000 > target_duration:
             clip = clip[:int(target_duration * 1000)]
 
-        # 处理：单声道 + 目标采样率
-        clip = clip.set_channels(1).set_frame_rate(target_sample_rate)
+        # 处理：首尾静音裁剪 + 轻微归一化 + fade，最后转单声道/采样率
+        clip = _prepare_voiceprint_clip(clip)
+        clip = clip.set_channels(1).set_frame_rate(target_sample_rate).set_sample_width(2)
 
         # 输出
         output_path = os.path.join(output_dir, f"{basename}_{speaker}_voiceprint.wav")
@@ -483,6 +498,97 @@ def extract_voiceprint(
     return results
 
 
+def _select_voiceprint_candidate(
+    audio: AudioSegment,
+    segments: list[SpeakerSegment],
+    target_duration: float,
+    min_segment_duration: float,
+    skip_initial_seconds: float,
+) -> tuple[float, float, float] | None:
+    """Choose a stable middle-conversation window for voice cloning."""
+    candidates: list[tuple[float, float, float]] = []
+    boundary_pad = 0.4
+    window = target_duration
+
+    for seg in segments:
+        start = max(seg.start + boundary_pad, skip_initial_seconds)
+        end = seg.end - boundary_pad
+        usable = end - start
+        if usable < min_segment_duration:
+            continue
+        if usable >= window:
+            # Test a few windows rather than blindly taking exact middle.
+            starts = {start, start + (usable - window) / 2, end - window}
+            for cand_start in sorted(starts):
+                cand_end = cand_start + window
+                clip = audio[int(cand_start * 1000): int(cand_end * 1000)]
+                score = _score_voiceprint_window(clip, cand_start, skip_initial_seconds)
+                candidates.append((score, cand_start, cand_end))
+        else:
+            clip = audio[int(start * 1000): int(end * 1000)]
+            score = _score_voiceprint_window(clip, start, skip_initial_seconds)
+            candidates.append((score - 0.15, start, end))
+
+    if not candidates:
+        return None
+    score, start, end = max(candidates, key=lambda x: x[0])
+    return start, end, score
+
+
+def _score_voiceprint_window(clip: AudioSegment, start_sec: float, skip_initial_seconds: float) -> float:
+    """Heuristic score for clean voiceprint windows."""
+    duration_sec = len(clip) / 1000.0
+    if duration_sec <= 0:
+        return -999.0
+
+    nonsilent = silence.detect_nonsilent(
+        clip,
+        min_silence_len=350,
+        silence_thresh=clip.dBFS - 18 if clip.dBFS != float("-inf") else -45,
+    )
+    voiced_ms = sum(end - start for start, end in nonsilent)
+    voiced_ratio = voiced_ms / max(1, len(clip))
+    silence_penalty = max(0.0, 0.85 - voiced_ratio)
+
+    loudness = clip.dBFS if clip.dBFS != float("-inf") else -60.0
+    loudness_score = 1.0 - min(1.0, abs(loudness + 20.0) / 25.0)
+    clipping_penalty = 0.4 if clip.max_dBFS > -0.2 else 0.0
+    early_penalty = 0.2 if start_sec <= skip_initial_seconds + 10 else 0.0
+
+    return (
+        0.45 * voiced_ratio
+        + 0.35 * loudness_score
+        + 0.20 * min(1.0, duration_sec / 20.0)
+        - silence_penalty
+        - clipping_penalty
+        - early_penalty
+    )
+
+
+def _prepare_voiceprint_clip(clip: AudioSegment) -> AudioSegment:
+    """Prepare a conservative voiceprint clip for enrollment."""
+    if len(clip) <= 0:
+        return clip
+
+    nonsilent = silence.detect_nonsilent(
+        clip,
+        min_silence_len=250,
+        silence_thresh=clip.dBFS - 18 if clip.dBFS != float("-inf") else -45,
+    )
+    if nonsilent:
+        start_ms = max(0, nonsilent[0][0] - 80)
+        end_ms = min(len(clip), nonsilent[-1][1] + 80)
+        clip = clip[start_ms:end_ms]
+
+    if clip.dBFS != float("-inf"):
+        target_dbfs = -20.0
+        gain = max(-6.0, min(6.0, target_dbfs - clip.dBFS))
+        clip = clip.apply_gain(gain)
+
+    fade_ms = min(50, max(10, len(clip) // 20))
+    return clip.fade_in(fade_ms).fade_out(fade_ms)
+
+
 # ============================================================
 # 高级接口：一键完成说话人分离 + 声纹提取
 # ============================================================
@@ -492,6 +598,9 @@ def extract_voiceprints_auto(
     output_dir: str,
     method: str = "energy",
     target_duration: float = 20.0,
+    min_segment_duration: float = 5.0,
+    target_sample_rate: int = 16000,
+    skip_initial_seconds: float = 90.0,
     # pyannote 参数
     hf_token: str = None,
     num_speakers: int = None,
@@ -512,6 +621,9 @@ def extract_voiceprints_auto(
         output_dir: 输出目录
         method: 分离方法 "pyannote" | "dashscope" | "energy"
         target_duration: 每个声纹目标时长
+        min_segment_duration: 最短候选片段时长
+        target_sample_rate: 输出声纹采样率
+        skip_initial_seconds: 默认跳过开头不稳定区域
         hf_token: pyannote 所需的 HuggingFace token
         num_speakers: 已知说话人数（None 自动检测）
         audio_url: dashscope 所需的公网 URL
@@ -556,6 +668,9 @@ def extract_voiceprints_auto(
         output_dir=output_dir,
         diarization=diarization,
         target_duration=target_duration,
+        min_segment_duration=min_segment_duration,
+        target_sample_rate=target_sample_rate,
+        skip_initial_seconds=skip_initial_seconds,
     )
 
     # 总结

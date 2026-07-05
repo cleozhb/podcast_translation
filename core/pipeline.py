@@ -17,6 +17,7 @@ from providers.base import (
 from core.audio_utils import download_audio, extract_voiceprints_auto, DiarizationResult, VoiceprintInfo, SpeakerSegment
 from core.progress import ProgressTracker
 from core.tts_preprocessor import preprocess_for_tts, preprocess_speaker_translations, PreprocessConfig
+from core.tts_preprocessor import contains_high_risk_tts_chars
 
 
 @dataclass
@@ -126,6 +127,9 @@ class Pipeline:
         self.pyannote_config = dc.get("pyannote", {})
         vp_config = dc.get("voiceprint", {})
         self.voiceprint_duration = vp_config.get("target_duration", 20)
+        self.voiceprint_min_segment_duration = vp_config.get("min_segment_duration", 5)
+        self.voiceprint_sample_rate = vp_config.get("sample_rate", 16000)
+        self.voiceprint_skip_initial_seconds = vp_config.get("skip_initial_seconds", 90)
 
         # dashscope 说话人分离的模型配置（复用 dashscope.stt_model，可单独覆盖）
         dashscope_cfg = config.get("dashscope", {})
@@ -675,6 +679,9 @@ class Pipeline:
             dashscope_api_key=dashscope_key,
             dashscope_model=self.diarization_model,
             language_hints=self.diarization_language_hints,
+            min_segment_duration=self.voiceprint_min_segment_duration,
+            target_sample_rate=self.voiceprint_sample_rate,
+            skip_initial_seconds=self.voiceprint_skip_initial_seconds,
         )
 
         if not voiceprints:
@@ -982,6 +989,10 @@ class Pipeline:
         preprocess_config = PreprocessConfig(
             max_sentence_chars=tts_pre_cfg.get("max_sentence_chars", 80),
             custom_word_map=tts_pre_cfg.get("custom_word_map"),
+            strip_speaker_labels=tts_pre_cfg.get("strip_speaker_labels", True),
+            clean_markup=tts_pre_cfg.get("clean_markup", True),
+            conservative_for_risky=tts_pre_cfg.get("conservative_for_risky", True),
+            risky_max_sentence_chars=tts_pre_cfg.get("risky_max_sentence_chars", 45),
         )
 
         has_multi_voice = (
@@ -1016,6 +1027,29 @@ class Pipeline:
                 output_path=output_path,
                 voice_url=voice_url,
             )
+        try:
+            from pydub import AudioSegment as PydubSegment
+            segment = PydubSegment.from_file(output_path)
+            segment = self._postprocess_tts_segment(segment)
+            segment.export(output_path, format="mp3")
+        except Exception as e:
+            print(f"  ⚠️ 单音色尾部后处理跳过: {e}")
+
+        if contains_high_risk_tts_chars(ctx.translation.translated_text):
+            self._write_tts_review(output_path, [{
+                "index": 1,
+                "speaker": "SPEAKER_00",
+                "role": "single",
+                "original_start": 0,
+                "original_end": 0,
+                "timestamp": "00:00:00-00:00:00",
+                "raw_text": ctx.translation.translated_text,
+                "tts_text": text,
+                "voice_url": voice_url or "",
+                "audio_path": output_path,
+                "high_risk_text": True,
+                "quality_warning": getattr(ctx.tts_result, "quality_warning", "") if ctx.tts_result else "",
+            }])
 
     def _synthesize_multi_speaker(self, ctx: PipelineContext, output_path: str, preprocess_config: PreprocessConfig):
         """
@@ -1042,7 +1076,9 @@ class Pipeline:
         temp_files = []
         total = len(ctx.speaker_translations)
         quality_warnings = []  # 收集质量警告：[(index, timestamp, text, reason)]
+        review_rows = []
 
+        raw_text_by_id = {id(item): item.get("translated", "") for item in ctx.speaker_translations}
         preprocess_speaker_translations(ctx.speaker_translations, preprocess_config)
         print(f"  🔧 TTS 预处理完成（{total} 段文本）")
 
@@ -1050,6 +1086,7 @@ class Pipeline:
             for i, item in enumerate(ctx.speaker_translations, 1):
                 speaker = item["speaker"]
                 text = item["translated"]
+                raw_text = raw_text_by_id.get(id(item), text)
 
                 if not text.strip():
                     continue
@@ -1094,6 +1131,10 @@ class Pipeline:
                             voice_url=voice_url,
                         )
 
+                    segment = PydubSegment.from_file(temp_path)
+                    segment = self._postprocess_tts_segment(segment)
+                    segment.export(temp_path, format="mp3")
+
                     # 检查质量警告（synthesize 降级返回时会设置此字段）
                     if tts_result and getattr(tts_result, 'quality_warning', ''):
                         warning_info = (i, ts_str, text, tts_result.quality_warning)
@@ -1105,7 +1146,6 @@ class Pipeline:
                         print(f"  处理: 使用当前音频继续（质量可能有问题）")
                         print(f"{'='*60}\n")
 
-                    segment = PydubSegment.from_file(temp_path)
                     chinese_start = len(combined) / 1000
                     combined += segment
                     chinese_end = len(combined) / 1000
@@ -1114,6 +1154,20 @@ class Pipeline:
                         "original_end": end_sec,
                         "chinese_start": chinese_start,
                         "chinese_end": chinese_end,
+                    })
+                    review_rows.append({
+                        "index": i,
+                        "speaker": speaker,
+                        "role": role,
+                        "original_start": start_sec,
+                        "original_end": end_sec,
+                        "timestamp": ts_str,
+                        "raw_text": raw_text,
+                        "tts_text": text,
+                        "voice_url": voice_url,
+                        "audio_path": temp_path,
+                        "high_risk_text": contains_high_risk_tts_chars(raw_text),
+                        "quality_warning": getattr(tts_result, "quality_warning", "") if tts_result else "",
                     })
                 except Exception as e:
                     # 单段合成失败，记录警告但不中断整个流程
@@ -1128,6 +1182,20 @@ class Pipeline:
                     # 插入等时长静音替代（按字数估算：约 5 字/秒）
                     silence_ms = max(1000, int(len(text) / 5 * 1000))
                     combined += PydubSegment.silent(duration=silence_ms)
+                    review_rows.append({
+                        "index": i,
+                        "speaker": speaker,
+                        "role": role,
+                        "original_start": start_sec,
+                        "original_end": end_sec,
+                        "timestamp": ts_str,
+                        "raw_text": raw_text,
+                        "tts_text": text,
+                        "voice_url": voice_url,
+                        "audio_path": "",
+                        "high_risk_text": contains_high_risk_tts_chars(raw_text),
+                        "quality_warning": str(e),
+                    })
 
                 # 说话人切换时加短暂停顿（更自然）
                 if i < total:
@@ -1152,10 +1220,65 @@ class Pipeline:
                     print(f"           原因: {reason}")
                 print(f"{'='*60}\n")
 
+            self._write_tts_review(output_path, review_rows)
+
         finally:
             for f in temp_files:
                 if os.path.exists(f):
                     os.remove(f)
+
+    @staticmethod
+    def _postprocess_tts_segment(segment):
+        """Trim trailing silence and apply a short fade-out without hard-cutting speech."""
+        from pydub import silence
+
+        # Remove only clear trailing silence. Keep a small tail so natural endings survive.
+        nonsilent = silence.detect_nonsilent(
+            segment,
+            min_silence_len=180,
+            silence_thresh=segment.dBFS - 16 if segment.dBFS != float("-inf") else -45,
+        )
+        if nonsilent:
+            end_ms = min(len(segment), nonsilent[-1][1] + 80)
+            segment = segment[:end_ms]
+        if len(segment) >= 160:
+            segment = segment.fade_out(min(120, max(40, len(segment) // 8)))
+        return segment
+
+    def _write_tts_review(self, output_path: str, rows: list[dict]) -> None:
+        """Write a replayable review manifest for high-risk and warned TTS segments."""
+        if not rows:
+            return
+        import csv
+        import shutil
+
+        base, _ = os.path.splitext(output_path)
+        json_path = f"{base}_tts_review.json"
+        csv_path = f"{base}_tts_review.csv"
+        clips_dir = f"{base}_tts_review_segments"
+        persisted = []
+        for row in rows:
+            keep = bool(row.get("high_risk_text") or row.get("quality_warning"))
+            if keep:
+                src = row.get("audio_path", "")
+                if src and os.path.exists(src):
+                    os.makedirs(clips_dir, exist_ok=True)
+                    dst = os.path.join(clips_dir, f"seg_{int(row['index']):04d}.mp3")
+                    shutil.copyfile(src, dst)
+                    row = dict(row)
+                    row["audio_path"] = dst
+                persisted.append(row)
+
+        if not persisted:
+            return
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(persisted, f, ensure_ascii=False, indent=2)
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(persisted[0].keys()))
+            writer.writeheader()
+            writer.writerows(persisted)
+        print(f"  🧪 TTS 审核清单: {json_path}")
 
     @staticmethod
     def _split_to_chunks(text: str, max_size: int) -> list[str]:

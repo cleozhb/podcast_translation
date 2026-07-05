@@ -30,6 +30,9 @@ cosyvoice:
   speech_rate: 1.5                         # 语速：取值范围 0.5-2.0，系统默认值为 1.0；数值大于 1.0 表示加速（如 1.2 为正常速度的 120%），小于 1.0 表示减速（如 0.8 为正常速度的 80%），可根据播客内容节奏调整
   pitch_rate: 1.0                          # 音调：取值范围 0.5-2.0，系统默认值为 1.0；影响语音的高低音调，建议保持默认以获得最自然的听感
   volume: 50                               # 音量：取值范围 0-100，系统默认值为 50；控制输出音频的整体响度，一般无需调整
+  instructions: "用自然中文播客口吻朗读，只朗读正文，不朗读标签、符号和括号标记，句尾自然收束。"
+  synthesis_language_hints: ["zh"]         # TTS 合成目标语言
+  enrollment_language_hints: ["en"]        # 声纹样本语言；英文播客默认 en
 
   # 合成质量验证（防乱码）
   # 每段合成后自动检测音频质量，乱码音频自动重试
@@ -39,6 +42,28 @@ cosyvoice:
     enabled: false                           # 是否开启质量验证，默认 false 省钱
     similarity_threshold: 0.35               # STT 识别文本与原文的相似度阈值，低于此值判定为乱码
     max_retries: 3                           # 质量不合格时最大重试次数
+
+# ---- TTS 模型对比实验（scripts/compare_tts_models.py）----
+# 当前脚本可直接生成 CosyVoice 对比音频；其他 provider 会先进入 manifest/rating 模板，
+# 填好 API key 后可按这些字段继续接对应 provider。
+tts_model_compare:
+  minimax:
+    api_key: ""
+    group_id: ""
+    model: "speech-2.8-hd"
+    voice_id: ""                 # 可填已克隆好的 voice_id
+  cartesia:
+    api_key: ""
+    model: "sonic-3.5"
+    voice_id: ""
+  elevenlabs:
+    api_key: ""
+    model: "eleven_multilingual_v2"
+    voice_id: ""
+  fish_audio:
+    api_key: ""
+    model: "s2-pro"
+    voice_id: ""
 
 # ---- 阿里云 OSS（TTS 声音克隆需要公网 URL）----
 oss:
@@ -108,12 +133,18 @@ diarization:
     target_duration: 20        # 目标声纹时长（秒）
     min_segment_duration: 5    # 最短可用片段（秒）
     sample_rate: 16000
+    skip_initial_seconds: 90   # 跳过开头不稳定区域，优先从中段对谈提取
 
 
 # ---- TTS 文本预处理 ----
 tts_preprocess:
   # 长句断句阈值（超过此字数自动在逗号处断开）
   max_sentence_chars: 80
+  # 高风险符号段更保守断句，并剥离只用于路由的 speaker 标签
+  strip_speaker_labels: true
+  clean_markup: true
+  conservative_for_risky: true
+  risky_max_sentence_chars: 45
   # 自定义英文词汇 → 中文读音映射（追加到内置词汇表）
   # 根据你翻译的播客内容按需扩充
   custom_word_map:
